@@ -1,4 +1,3 @@
-use std::fmt::format;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use base64::Engine as Base64Engine;
