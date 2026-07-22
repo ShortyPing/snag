@@ -1,6 +1,8 @@
+use std::fmt::format;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-
+use base64::Engine as Base64Engine;
+use base64::prelude::BASE64_STANDARD;
 use rhai::serde::{from_dynamic, to_dynamic};
 use rhai::{Dynamic, Engine, EvalAltResult, Map};
 
@@ -115,6 +117,13 @@ pub fn register_http(engine: &mut Engine, client: reqwest::blocking::Client) {
     engine.register_get("text", |r: &mut Response| r.text.clone());
     engine.register_get("duration_ms", |r: &mut Response| r.duration_ms as i64);
     engine.register_fn("json", |r: &mut Response| json_to_dynamic(&r.text));
+    engine.register_fn("basic", |username: String, password: String| -> Result<String, Box<EvalAltResult>> {
+        let str = format!("{}:{}", username, password);
+        let bytes = str.as_bytes();
+        let encoded = BASE64_STANDARD.encode(bytes);
+
+        Ok(format!("Basic {}", encoded))
+    });
     engine.register_fn("header", |r: &mut Response, name: &str| {
         let wanted = name.to_ascii_lowercase();
         r.headers
