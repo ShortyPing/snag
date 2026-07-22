@@ -113,7 +113,11 @@ fn normalize(path: &Path) -> PathBuf {
         .filter(|c| !matches!(c, Component::CurDir))
         .collect();
 
-    if cleaned.as_os_str().is_empty() { PathBuf::from(".") } else { cleaned }
+    if cleaned.as_os_str().is_empty() {
+        PathBuf::from(".")
+    } else {
+        cleaned
+    }
 }
 
 #[cfg(test)]
@@ -185,7 +189,10 @@ file = "./scripts/t.snag"
 
     #[test]
     fn normalize_strips_dot_components() {
-        assert_eq!(normalize(Path::new("./a/./b.snag")), PathBuf::from("a/b.snag"));
+        assert_eq!(
+            normalize(Path::new("./a/./b.snag")),
+            PathBuf::from("a/b.snag")
+        );
         assert_eq!(normalize(Path::new("./")), PathBuf::from("."));
         assert_eq!(normalize(Path::new("a/../b")), PathBuf::from("a/../b"));
     }

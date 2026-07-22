@@ -122,7 +122,13 @@ pub struct Human {
 
 impl Human {
     fn new(out: Box<dyn Write + Send>, color: bool, quiet: bool, verbose: bool) -> Self {
-        Human { out, color, quiet, verbose, failures: vec![] }
+        Human {
+            out,
+            color,
+            quiet,
+            verbose,
+            failures: vec![],
+        }
     }
 
     fn paint(&self, code: &str, text: &str) -> String {
@@ -336,8 +342,15 @@ fn tc_escape(s: &str) -> String {
 
 impl Reporter for TeamCity {
     fn run_started(&mut self, tests: &[Test]) -> anyhow::Result<()> {
-        let name = tests.first().map(|t| t.suite_title.as_str()).unwrap_or("snag");
-        writeln!(self.out, "##teamcity[testSuiteStarted name='{}']", tc_escape(name))?;
+        let name = tests
+            .first()
+            .map(|t| t.suite_title.as_str())
+            .unwrap_or("snag");
+        writeln!(
+            self.out,
+            "##teamcity[testSuiteStarted name='{}']",
+            tc_escape(name)
+        )?;
         Ok(())
     }
 
@@ -355,7 +368,11 @@ impl Reporter for TeamCity {
     fn test_finished(&mut self, o: &Outcome) -> anyhow::Result<()> {
         let name = tc_escape(&o.test.name);
         for line in &o.output {
-            writeln!(self.out, "##teamcity[testStdOut name='{name}' out='{}']", tc_escape(line))?;
+            writeln!(
+                self.out,
+                "##teamcity[testStdOut name='{name}' out='{}']",
+                tc_escape(line)
+            )?;
         }
         match o.status {
             Status::Failed | Status::TimedOut => writeln!(

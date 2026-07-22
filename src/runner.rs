@@ -49,13 +49,24 @@ pub fn run(ctx: &Ctx, args: &RunArgs) -> anyhow::Result<Exit> {
 
         let cancel = AtomicBool::new(false);
         execute_batch(&serial, args, 1, &cancel, &mut summary, reporter.as_mut())?;
-        execute_batch(&parallel, args, jobs(args.jobs), &cancel, &mut summary, reporter.as_mut())?;
+        execute_batch(
+            &parallel,
+            args,
+            jobs(args.jobs),
+            &cancel,
+            &mut summary,
+            reporter.as_mut(),
+        )?;
     }
 
     summary.duration = started.elapsed();
     reporter.run_finished(&summary)?;
 
-    Ok(if summary.is_green() { Exit::Ok } else { Exit::TestsFailed })
+    Ok(if summary.is_green() {
+        Exit::Ok
+    } else {
+        Exit::TestsFailed
+    })
 }
 
 pub fn check(ctx: &Ctx, tests: &[Test]) -> anyhow::Result<Exit> {
@@ -107,7 +118,11 @@ fn build_reporter(ctx: &Ctx, args: &RunArgs) -> anyhow::Result<Box<dyn Reporter>
     // in the file. `--format human` there would be useless, so the file gets JSON.
     let file = std::fs::File::create(path)
         .map_err(|e| anyhow::anyhow!("cannot write report to {}: {e}", path.display()))?;
-    let machine_format = if ctx.format == Format::Human { Format::Json } else { ctx.format };
+    let machine_format = if ctx.format == Format::Human {
+        Format::Json
+    } else {
+        ctx.format
+    };
 
     Ok(Box::new(Multi(vec![
         reporter_for(Format::Human, ctx, Box::new(std::io::stdout())),
@@ -119,7 +134,9 @@ fn jobs(requested: usize) -> usize {
     if requested > 0 {
         return requested;
     }
-    std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1)
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
 }
 
 enum Event {
@@ -242,7 +259,11 @@ enum Failure {
     Error(String),
 }
 
-fn execute_once(test: &Test, timeout: Option<Duration>, sink: &crate::scripting_registration::OutputSink) -> Result<(), Failure> {
+fn execute_once(
+    test: &Test,
+    timeout: Option<Duration>,
+    sink: &crate::scripting_registration::OutputSink,
+) -> Result<(), Failure> {
     if !test.script.exists() {
         return Err(Failure::Error(format!(
             "script {} does not exist",
@@ -252,7 +273,12 @@ fn execute_once(test: &Test, timeout: Option<Duration>, sink: &crate::scripting_
 
     let source = match fs::read_to_string(&test.script) {
         Ok(s) => s,
-        Err(e) => return Err(Failure::Error(format!("reading {}: {e}", test.script.display()))),
+        Err(e) => {
+            return Err(Failure::Error(format!(
+                "reading {}: {e}",
+                test.script.display()
+            )));
+        }
     };
 
     // The client needs the deadline too: on_progress can't interrupt a socket

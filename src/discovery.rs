@@ -51,8 +51,8 @@ pub fn suite_files(paths: &[PathBuf]) -> anyhow::Result<Vec<PathBuf>> {
         for path in paths {
             let as_str = path.to_string_lossy();
             if is_glob(&as_str) {
-                let matches = glob::glob(&as_str)
-                    .with_context(|| format!("bad glob pattern `{as_str}`"))?;
+                let matches =
+                    glob::glob(&as_str).with_context(|| format!("bad glob pattern `{as_str}`"))?;
                 for entry in matches {
                     let entry = entry?;
                     if entry.is_dir() {

@@ -58,7 +58,8 @@ pub fn register_http(engine: &mut Engine, client: reqwest::blocking::Client) {
         b
     });
     engine.register_fn("bearer", |mut b: ReqBuilder, token: &str| {
-        b.headers.push(("authorization".into(), format!("Bearer {token}")));
+        b.headers
+            .push(("authorization".into(), format!("Bearer {token}")));
         b
     });
     engine.register_fn("body", |mut b: ReqBuilder, body: &str| {
@@ -68,42 +69,46 @@ pub fn register_http(engine: &mut Engine, client: reqwest::blocking::Client) {
     engine.register_fn(
         "json",
         |mut b: ReqBuilder, body: Dynamic| -> Result<ReqBuilder, Box<EvalAltResult>> {
-            b.headers.push(("content-type".into(), "application/json".into()));
+            b.headers
+                .push(("content-type".into(), "application/json".into()));
             b.body = Some(dynamic_to_json_string(&body)?);
             Ok(b)
         },
     );
 
     // The only call that hits the network. Errors surface as Rhai throws.
-    engine.register_fn("send", |b: ReqBuilder| -> Result<Response, Box<EvalAltResult>> {
-        let method = b
-            .method
-            .parse::<reqwest::Method>()
-            .map_err(|_| format!("bad method: {}", b.method))?;
-        let mut req = b.client.request(method, &b.url);
-        for (k, v) in &b.headers {
-            req = req.header(k, v);
-        }
-        if let Some(body) = b.body {
-            req = req.body(body);
-        }
+    engine.register_fn(
+        "send",
+        |b: ReqBuilder| -> Result<Response, Box<EvalAltResult>> {
+            let method = b
+                .method
+                .parse::<reqwest::Method>()
+                .map_err(|_| format!("bad method: {}", b.method))?;
+            let mut req = b.client.request(method, &b.url);
+            for (k, v) in &b.headers {
+                req = req.header(k, v);
+            }
+            if let Some(body) = b.body {
+                req = req.body(body);
+            }
 
-        let start = std::time::Instant::now();
-        let resp = req.send().map_err(|e| format!("request failed: {e}"))?;
-        let status = resp.status().as_u16();
-        let headers = resp
-            .headers()
-            .iter()
-            .map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap_or("").to_string()))
-            .collect();
-        let text = resp.text().map_err(|e| format!("read body failed: {e}"))?;
-        Ok(Response {
-            status,
-            text,
-            headers,
-            duration_ms: start.elapsed().as_millis() as u64,
-        })
-    });
+            let start = std::time::Instant::now();
+            let resp = req.send().map_err(|e| format!("request failed: {e}"))?;
+            let status = resp.status().as_u16();
+            let headers = resp
+                .headers()
+                .iter()
+                .map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap_or("").to_string()))
+                .collect();
+            let text = resp.text().map_err(|e| format!("read body failed: {e}"))?;
+            Ok(Response {
+                status,
+                text,
+                headers,
+                duration_ms: start.elapsed().as_millis() as u64,
+            })
+        },
+    );
 
     engine.register_get("status", |r: &mut Response| r.status as i64);
     engine.register_get("ok", |r: &mut Response| (200..300).contains(&r.status));
@@ -162,17 +167,20 @@ pub fn register_assertions(engine: &mut Engine) {
         },
     );
 
-    engine.register_fn("assert_ok", |r: &mut Response| -> Result<(), Box<EvalAltResult>> {
-        if (200..300).contains(&r.status) {
-            return Ok(());
-        }
-        Err(format!(
-            "assertion failed: expected a 2xx status, got {}\nbody: {}",
-            r.status,
-            truncate(&r.text, 500)
-        )
-        .into())
-    });
+    engine.register_fn(
+        "assert_ok",
+        |r: &mut Response| -> Result<(), Box<EvalAltResult>> {
+            if (200..300).contains(&r.status) {
+                return Ok(());
+            }
+            Err(format!(
+                "assertion failed: expected a 2xx status, got {}\nbody: {}",
+                r.status,
+                truncate(&r.text, 500)
+            )
+            .into())
+        },
+    );
 
     engine.register_fn(
         "assert_body_contains",
@@ -202,12 +210,15 @@ pub fn register_assertions(engine: &mut Engine) {
         },
     );
 
-    engine.register_fn("assert", |cond: bool, msg: &str| -> Result<(), Box<EvalAltResult>> {
-        if cond {
-            return Ok(());
-        }
-        Err(format!("assertion failed: {msg}").into())
-    });
+    engine.register_fn(
+        "assert",
+        |cond: bool, msg: &str| -> Result<(), Box<EvalAltResult>> {
+            if cond {
+                return Ok(());
+            }
+            Err(format!("assertion failed: {msg}").into())
+        },
+    );
 
     // No generics in Rhai, so assert_eq is one overload per scalar type.
     engine.register_fn("assert_eq", |a: i64, b: i64| eq_result(a, b));
@@ -276,9 +287,10 @@ fn dig(value: Dynamic, path: &str) -> Result<Dynamic, Box<EvalAltResult>> {
                 .cloned()
                 .ok_or_else(|| format!("index {index} out of range in path `{path}`"))?;
         } else {
-            return Err(
-                format!("cannot descend into `{segment}`: value is not an object or array").into(),
-            );
+            return Err(format!(
+                "cannot descend into `{segment}`: value is not an object or array"
+            )
+            .into());
         }
     }
     Ok(current)
@@ -315,7 +327,9 @@ mod tests {
 
     #[test]
     fn assert_passes_silently() {
-        engine().run(r#"assert_eq("a", "a"); assert(true, "x");"#).unwrap();
+        engine()
+            .run(r#"assert_eq("a", "a"); assert(true, "x");"#)
+            .unwrap();
     }
 
     #[test]
@@ -349,7 +363,9 @@ mod tests {
     #[test]
     fn env_or_falls_back() {
         let e = engine();
-        let v: String = e.eval(r#"env_or("SNAG_DEFINITELY_UNSET_VAR", "fallback")"#).unwrap();
+        let v: String = e
+            .eval(r#"env_or("SNAG_DEFINITELY_UNSET_VAR", "fallback")"#)
+            .unwrap();
         assert_eq!(v, "fallback");
     }
 

@@ -4,12 +4,12 @@ pub mod report;
 pub mod runner;
 pub mod scripting_registration;
 
+use crate::discovery::discover;
+use crate::runner::run;
+use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use std::io;
 use std::io::Write;
 use std::path::PathBuf;
-use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
-use crate::discovery::discover;
-use crate::runner::run;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -242,8 +242,21 @@ const VERBS: &[&str] = &["run", "list", "check", "init", "completions", "help"];
 // variadic positional alongside subcommands, so the verb goes in by hand.
 fn implicit_run<I: IntoIterator<Item = String>>(args: I) -> Vec<String> {
     const TAKES_VALUE: &[&str] = &[
-        "-f", "--format", "--color", "-k", "--filter", "-t", "--tag", "-e", "--exclude", "-j",
-        "--jobs", "--timeout", "--retries", "--seed", "--report",
+        "-f",
+        "--format",
+        "--color",
+        "-k",
+        "--filter",
+        "-t",
+        "--tag",
+        "-e",
+        "--exclude",
+        "-j",
+        "--jobs",
+        "--timeout",
+        "--retries",
+        "--seed",
+        "--report",
     ];
 
     let mut args: Vec<String> = args.into_iter().collect();
@@ -332,7 +345,11 @@ fn cmd_list(ctx: &Ctx, args: ListArgs) -> anyhow::Result<Exit> {
                         "{}\n    name:   {}\n    tags:   {}\n    script: {}",
                         test.qualified_id(),
                         test.name,
-                        if test.tags.is_empty() { "-".into() } else { test.tags.join(", ") },
+                        if test.tags.is_empty() {
+                            "-".into()
+                        } else {
+                            test.tags.join(", ")
+                        },
                         test.script.display()
                     )?;
                 } else {
@@ -389,7 +406,9 @@ assert_faster_than(res, 5000);
     }
     std::fs::write(&args.path, SUITE_TEMPLATE)?;
 
-    let script = dir.unwrap_or_else(|| std::path::Path::new(".")).join("get_status.snag");
+    let script = dir
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .join("get_status.snag");
     if !script.exists() || args.force {
         std::fs::write(&script, SCRIPT_TEMPLATE)?;
     }
