@@ -1,0 +1,10 @@
+let res = post(`${base_url}/post`)
+    .json(#{ project: "snag", ok: true })
+    .send();
+
+assert_ok(res);
+
+let body = res.json();
+assert_eq(field(body, "json.project"), "snag");
+assert_eq(field(body, "json.ok"), true);
+assert_contains(res.header("content-type"), "application/json");

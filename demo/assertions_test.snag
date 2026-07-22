@@ -1,0 +1,7 @@
+assert_eq(1 + 1, 2);
+assert_eq("snag", "snag");
+assert_contains("regression suite", "suite");
+assert(base_url.starts_with("https://"), "base_url must be https");
+
+let stage = env_or("SNAG_STAGE", "local");
+print(`running against ${stage}`);

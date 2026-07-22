@@ -1,0 +1,9 @@
+let res = get(base_url)
+    .header("accept", "text/html")
+    .send();
+
+assert_status(res, 200);
+assert_body_contains(res, "Example Domain");
+assert_faster_than(res, 5000);
+
+print(`served in ${res.duration_ms}ms`);

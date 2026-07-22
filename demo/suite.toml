@@ -1,0 +1,31 @@
+title = "Snag Demo Regression Suite"
+
+# Applies to every test in the file unless the test sets its own.
+timeout = "10s"
+
+[variables]
+base_url = "https://example.com"
+
+[[test]]
+id = "example-responds"
+name = "example.com answers 200"
+parallel_safe = true
+tags = ["network", "smoke"]
+file = "./example_test.snag"
+
+[[test]]
+id = "json-api"
+name = "JSON body can be walked by path"
+tags = ["network"]
+timeout = "20s"
+file = "./json_test.snag"
+
+[test.variables]
+# Test-level variables win over the suite-level ones above.
+base_url = "https://httpbin.org"
+
+[[test]]
+id = "assertions"
+name = "assertion helpers, no network"
+tags = ["fast"]
+file = "./assertions_test.snag"
