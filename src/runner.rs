@@ -373,6 +373,291 @@ mod tests {
         tests.iter().map(|t| t.id.clone()).collect()
     }
 
+    // Writes a script next to the other runner fixtures; names must be unique
+    // because `cargo test` runs these in one process, in parallel.
+    fn script(name: &str, body: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("snag-runner-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(name);
+        std::fs::write(&path, body).unwrap();
+        path
+    }
+
+    fn with_script(id: &str, path: PathBuf) -> Test {
+        Test {
+            script: path,
+            ..dummy(id)
+        }
+    }
+
+    fn args() -> RunArgs {
+        RunArgs {
+            selection: crate::SelectionArgs {
+                paths: vec![],
+                filter: vec![],
+                tag: vec![],
+                exclude: vec![],
+                regex: false,
+            },
+            jobs: 1,
+            fail_fast: false,
+            timeout: None,
+            retries: 0,
+            seed: None,
+            dry_run: false,
+            report: None,
+        }
+    }
+
+    #[derive(Default)]
+    struct Recorder {
+        started: Vec<String>,
+        finished: Vec<Outcome>,
+        // Makes test_finished fail once, for the reporter-error path.
+        fail_on: Option<String>,
+    }
+
+    impl Recorder {
+        fn finished_ids(&self) -> Vec<String> {
+            self.finished.iter().map(|o| o.test.id.clone()).collect()
+        }
+
+        fn status_of(&self, id: &str) -> Status {
+            self.finished
+                .iter()
+                .find(|o| o.test.id == id)
+                .unwrap_or_else(|| panic!("{id} never finished"))
+                .status
+        }
+    }
+
+    impl Reporter for Recorder {
+        fn test_started(&mut self, test: &Test) -> anyhow::Result<()> {
+            self.started.push(test.id.clone());
+            Ok(())
+        }
+
+        fn test_finished(&mut self, outcome: &Outcome) -> anyhow::Result<()> {
+            self.finished.push(outcome.clone());
+            if self.fail_on.as_deref() == Some(outcome.test.id.as_str()) {
+                anyhow::bail!("reporter exploded on {}", outcome.test.id);
+            }
+            Ok(())
+        }
+    }
+
+    fn batch(
+        tests: &[Test],
+        args: &RunArgs,
+        workers: usize,
+        cancel: &AtomicBool,
+    ) -> (anyhow::Result<()>, Summary, Recorder) {
+        let mut summary = Summary::default();
+        let mut recorder = Recorder::default();
+        let result = execute_batch(tests, args, workers, cancel, &mut summary, &mut recorder);
+        (result, summary, recorder)
+    }
+
+    #[test]
+    fn empty_batch_reports_nothing() {
+        let (result, summary, recorder) = batch(&[], &args(), 4, &AtomicBool::new(false));
+        assert!(result.is_ok());
+        assert_eq!(summary.total(), 0);
+        assert!(recorder.started.is_empty());
+        assert!(recorder.finished.is_empty());
+    }
+
+    #[test]
+    fn every_test_runs_exactly_once_across_workers() {
+        let path = script("pass_once.snag", "let x = 1;");
+        let tests: Vec<Test> = (0..8)
+            .map(|i| with_script(&format!("t{i}"), path.clone()))
+            .collect();
+
+        let (result, summary, recorder) = batch(&tests, &args(), 4, &AtomicBool::new(false));
+
+        assert!(result.is_ok());
+        assert_eq!(summary.passed, 8);
+        assert_eq!(summary.total(), 8);
+
+        let mut got = recorder.finished_ids();
+        got.sort();
+        assert_eq!(got, ids(&tests));
+        assert_eq!(recorder.started.len(), 8);
+    }
+
+    #[test]
+    fn more_workers_than_tests_is_fine() {
+        let path = script("pass_few.snag", "let x = 1;");
+        let tests = vec![
+            with_script("t0", path.clone()),
+            with_script("t1", path.clone()),
+        ];
+
+        let (result, summary, recorder) = batch(&tests, &args(), 32, &AtomicBool::new(false));
+
+        assert!(result.is_ok());
+        assert_eq!(summary.passed, 2);
+        assert_eq!(recorder.finished.len(), 2);
+    }
+
+    #[test]
+    fn zero_workers_still_runs_the_batch() {
+        let path = script("pass_zero_workers.snag", "let x = 1;");
+        let tests = vec![with_script("t0", path)];
+
+        let (result, summary, _) = batch(&tests, &args(), 0, &AtomicBool::new(false));
+
+        assert!(result.is_ok());
+        assert_eq!(summary.passed, 1);
+    }
+
+    #[test]
+    fn a_missing_script_fails_the_test() {
+        // dummy() points at a script that was never written.
+        let tests = vec![dummy("t0")];
+
+        let (result, summary, recorder) = batch(&tests, &args(), 1, &AtomicBool::new(false));
+
+        assert!(result.is_ok());
+        assert_eq!(summary.failed, 1);
+        let outcome = &recorder.finished[0];
+        assert_eq!(outcome.status, Status::Failed);
+        assert!(
+            outcome
+                .message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("does not exist"),
+            "unexpected message: {:?}",
+            outcome.message
+        );
+    }
+
+    #[test]
+    fn failures_do_not_stop_the_batch_without_fail_fast() {
+        let ok = script("pass_no_ff.snag", "let x = 1;");
+        let bad = script("throw_no_ff.snag", r#"throw "boom";"#);
+        let tests = vec![
+            with_script("t0", bad),
+            with_script("t1", ok.clone()),
+            with_script("t2", ok.clone()),
+            with_script("t3", ok),
+        ];
+
+        let (result, summary, recorder) = batch(&tests, &args(), 1, &AtomicBool::new(false));
+
+        assert!(result.is_ok());
+        assert_eq!(summary.failed, 1);
+        assert_eq!(summary.passed, 3);
+        assert_eq!(summary.skipped, 0);
+        assert_eq!(recorder.started.len(), 4);
+    }
+
+    #[test]
+    fn fail_fast_skips_the_remaining_tests() {
+        let ok = script("pass_ff.snag", "let x = 1;");
+        let bad = script("throw_ff.snag", r#"throw "boom";"#);
+        let tests = vec![
+            with_script("t0", bad),
+            with_script("t1", ok.clone()),
+            with_script("t2", ok.clone()),
+            with_script("t3", ok),
+        ];
+
+        let mut args = args();
+        args.fail_fast = true;
+        let cancel = AtomicBool::new(false);
+
+        // One worker keeps the order deterministic: t0 fails, t1..t3 are skipped.
+        let (result, summary, recorder) = batch(&tests, &args, 1, &cancel);
+
+        assert!(result.is_ok());
+        assert!(cancel.load(Ordering::SeqCst));
+        assert_eq!(summary.failed, 1);
+        assert_eq!(summary.skipped, 3);
+        assert_eq!(summary.passed, 0);
+        assert_eq!(recorder.started, vec!["t0"]);
+        assert_eq!(recorder.status_of("t3"), Status::Skipped);
+        assert_eq!(
+            recorder.finished[3].message.as_deref(),
+            Some("skipped after an earlier failure")
+        );
+    }
+
+    #[test]
+    fn an_already_cancelled_batch_skips_everything() {
+        let path = script("pass_cancelled.snag", "let x = 1;");
+        let tests: Vec<Test> = (0..3)
+            .map(|i| with_script(&format!("t{i}"), path.clone()))
+            .collect();
+
+        let (result, summary, recorder) = batch(&tests, &args(), 2, &AtomicBool::new(true));
+
+        assert!(result.is_ok());
+        assert_eq!(summary.skipped, 3);
+        assert_eq!(summary.passed, 0);
+        assert!(recorder.started.is_empty());
+    }
+
+    #[test]
+    fn a_reporter_error_is_returned_and_cancels_the_batch() {
+        let path = script("pass_reporter_err.snag", "let x = 1;");
+        let tests: Vec<Test> = (0..4)
+            .map(|i| with_script(&format!("t{i}"), path.clone()))
+            .collect();
+
+        let mut summary = Summary::default();
+        let mut recorder = Recorder {
+            fail_on: Some("t0".into()),
+            ..Recorder::default()
+        };
+        let cancel = AtomicBool::new(false);
+
+        let result = execute_batch(&tests, &args(), 1, &cancel, &mut summary, &mut recorder);
+
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("reporter exploded on t0"));
+        assert!(cancel.load(Ordering::SeqCst));
+        // Every test still gets an outcome, whether it ran or was drained as
+        // skipped — how many of each depends on how far the worker raced ahead
+        // before the main thread saw the error.
+        assert_eq!(summary.total(), 4);
+        assert_eq!(recorder.finished.len(), 4);
+        assert_eq!(recorder.started.first().map(String::as_str), Some("t0"));
+    }
+
+    #[test]
+    fn a_failing_test_is_retried_before_it_is_reported() {
+        let bad = script("throw_retry.snag", r#"throw "boom";"#);
+        let tests = vec![with_script("t0", bad)];
+
+        let mut args = args();
+        args.retries = 2;
+
+        let (result, summary, recorder) = batch(&tests, &args, 1, &AtomicBool::new(false));
+
+        assert!(result.is_ok());
+        assert_eq!(summary.failed, 1);
+        assert_eq!(recorder.finished.len(), 1);
+        assert_eq!(recorder.finished[0].attempts, 3);
+    }
+
+    #[test]
+    fn a_slow_test_times_out() {
+        let slow = script("slow_timeout.snag", "let i = 0; while true { i += 1; }");
+        let tests = vec![with_script("t0", slow)];
+
+        let mut args = args();
+        args.timeout = Some(Duration::from_millis(50));
+
+        let (result, summary, recorder) = batch(&tests, &args, 1, &AtomicBool::new(false));
+
+        assert!(result.is_ok());
+        assert_eq!(summary.timed_out, 1);
+        assert_eq!(recorder.finished[0].status, Status::TimedOut);
+    }
+
     #[test]
     fn same_seed_gives_same_order() {
         let mut a: Vec<Test> = (0..10).map(|i| dummy(&format!("t{i}"))).collect();
