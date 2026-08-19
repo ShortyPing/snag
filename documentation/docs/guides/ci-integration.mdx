@@ -228,12 +228,21 @@ file = "./wait_for_ready.snag"
 ```js title="wait_for_ready.snag"
 let healthy = false;
 for i in 0..30 {
-    let res = get(`${base_url}/health`).send();
-    if res.ok { healthy = true; break; }
+    // A service that is not listening yet makes `.send()` throw, which would
+    // end the test on the first pass — catch it and keep polling.
+    try {
+        let res = get(`${base_url}/health`).send();
+        if res.ok { healthy = true; break; }
+    } catch (err) {
+        print(`not up yet: ${err}`);
+    }
     sleep_ms(2000);
 }
 assert(healthy, "service never became healthy");
 ```
+
+`try`/`catch` is Rhai's own, and it is the only way to keep a failed request from
+ending the test — every other error in a script is terminal by design.
 
 Combine that with `--fail-fast` and a broken deployment fails in seconds instead
 of timing out one test at a time.

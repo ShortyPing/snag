@@ -25,7 +25,7 @@ cargo test -- --nocapture        # see println! output
 | `discovery` | Filter semantics — substring, exclude-beats-include, tag OR-ing, regex anchors, bad regex, suite-name recognition |
 | `manifest` | Variable precedence, defaults, manifest-relative script paths, path normalisation, duplicate ids, timeout precedence |
 | `report` | XML and TeamCity escaping, duration formatting, summary greenness |
-| `runner` | Shuffle determinism, `jobs()`, and the full `execute_batch` surface |
+| `runner` | Shuffle determinism, `jobs()`, the full `execute_batch` surface, and the hook lifecycle — setup scope sharing, teardown ordering, `always = false`, `on_teardown`, cleanup after a timeout |
 | `scripting_registration` | Assertion messages, `field()` traversal and its errors, output capture, `env_or` fallback, truncation |
 
 ## Fixture conventions
@@ -43,9 +43,11 @@ fn write_temp(name: &str, body: &str) -> PathBuf {
 }
 ```
 
-`runner` uses the same shape with a `snag-runner-` prefix. File **names** must
-be unique per test, because `cargo test` runs tests in one process, in parallel,
-and they share the directory.
+`runner` uses the same shape with a `snag-runner-` prefix, wrapped in a `script`
+helper, plus `with_script(id, path)` and `hook(path, always)` for tests that need
+a real file behind a `Test` or a `Hook`. File **names** must be unique per test,
+because `cargo test` runs tests in one process, in parallel, and they share the
+directory.
 
 **In-memory values** get a builder:
 
@@ -59,6 +61,8 @@ fn dummy(id: &str) -> Test {
         parallel_safe: true,
         script: PathBuf::from("t.snag"),
         vars: BTreeMap::new(),
+        setup: vec![],
+        teardown: vec![],
         suite_title: "s".into(),
         suite_path: PathBuf::from("suite.toml"),
     }

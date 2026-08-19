@@ -138,10 +138,13 @@ Every failure names the segment that failed:
 
 | Situation | Message |
 | --- | --- |
-| Missing map key | `no key 'nope' in path 'a.nope'` |
-| Non-numeric segment on an array | `'x' in path 'items.x' is not an array index` |
-| Index past the end | `index 3 out of range in path 'items.3'` |
-| Descent into a scalar | `cannot descend into 'x': value is not an object or array` |
+| Missing map key | ``no key `nope` in path `a.nope` `` |
+| Non-numeric segment on an array | `` `x` in path `items.x` is not an array index `` |
+| Index past the end | ``index 3 out of range in path `items.3` `` |
+| Descent into a scalar | ``cannot descend into `x`: value is not an object or array`` |
+
+The paths and keys are quoted with backticks in the real output, which is what to
+grep a CI log for.
 
 That is the reason to prefer `field()` over direct indexing for anything more
 than one level deep.

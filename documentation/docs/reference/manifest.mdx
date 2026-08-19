@@ -163,11 +163,14 @@ merge:
 [variables]  →  [test.variables]
 ```
 
-**Timeouts** — tightest wins:
+**Timeouts** — the most specific setting wins, not the tightest one:
 
 ```
 suite timeout  →  test timeout  →  --timeout
 ```
+
+Each step overrides the one before it whatever its value, so `--timeout 60s`
+*relaxes* a test declaring `timeout = "1s"`.
 
 **Parallelism** — `parallel_safe = false` always means the serial phase; `-j`
 only sizes the pool for the parallel phase.

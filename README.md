@@ -64,9 +64,33 @@ body by dotted path (a missing key fails the test rather than returning `()`).
 **Assertions** — `assert_status`, `assert_ok`, `assert_body_contains`,
 `assert_faster_than`, `assert_eq`, `assert_contains`, `assert(cond, msg)`, `fail(msg)`.
 
+**Auth** — `basic(user, password)` returns a ready `Basic <base64>` header value;
+`.bearer(token)` covers the other common case.
+
 **Misc** — `env("NAME")` (fails if unset), `env_or("NAME", "default")`,
 `sleep_ms(n)`, `print(...)` and `print_response(res)`. Printed output is captured
 per test, shown under failures, and under passes with `-v`.
+
+## Setup and teardown
+
+Shared steps live in their own scripts and are wired up per suite or per test.
+Suite hooks wrap test hooks: setup runs outside-in, teardown unwinds inside-out.
+
+```toml
+setup = "./login.snag"                                # every test in the file
+teardown = { file = "./reset.snag", always = true }   # `always = false` skips it after a failure
+
+[[test]]
+id = "cart-create"
+file = "./cart_create.snag"
+setup = ["./seed.snag"]                               # after the suite's setup
+```
+
+A script can also carry its own: `fn setup()` runs before the body and leaves its
+variables in scope for it, `fn teardown()` runs after it whatever happened, and
+`on_teardown(|| ...)` registers cleanup at the point the resource is created —
+callbacks unwind last-registered-first. Hooks and the test share one scope, and
+teardown gets a fresh timeout budget so cleanup survives a timed-out test.
 
 ## Selecting tests
 

@@ -188,15 +188,23 @@ rather than pretending it is deterministic.
 `execute()` wraps `execute_once()` in the retry loop, timing the whole thing and
 reporting `attempts`. `execute_once()`:
 
-1. Checks the script exists, then reads it.
-2. Builds a `reqwest::blocking::Client`, applying the timeout if there is one.
-3. Builds a fresh `rhai::Engine` and registers HTTP, debug, assertion, and env
-   functions.
-4. Installs an `on_progress` hook when a timeout applies: every
+1. Builds a `reqwest::blocking::Client`, applying the timeout if there is one.
+2. Builds a fresh `rhai::Engine` and runs all five `register_*` functions
+   against it, handing `register_teardown` a fresh `on_teardown` queue.
+3. Installs an `on_progress` hook when a timeout applies: every
    `PROGRESS_INTERVAL` (2,000) operations it compares `Instant::now()` against
-   the deadline and returns `Some(Dynamic::UNIT)` to abort.
+   the deadline held in a shared cell, and returns `Some(Dynamic::UNIT)` to
+   abort.
+4. Compiles the setup hooks, the teardown hooks, and the test script — all of it
+   up front, so a broken hook fails before the first request goes out — then
+   merges every script's functions into one AST, which is what makes an
+   `on_teardown` closure callable later.
 5. Pushes the test's variables into a `Scope` as **constants**.
-6. Runs the script, and passes any error through `classify()`.
+6. Runs setup scripts → `fn setup()` → the script body, sharing that one
+   `Scope`, and passes any error through `classify()`.
+7. Refreshes the deadline with a full budget and runs teardown —
+   `on_teardown` callbacks last-first, then `fn teardown()`, then the teardown
+   hooks — so cleanup after a timed-out test still gets to run.
 
 `classify()` calls it a timeout when the interpreter reported
 `ErrorTerminated` **or** the elapsed time already exceeded the budget — the
@@ -240,7 +248,7 @@ exit code is decided.
 
 ## `scripting_registration.rs` — the script surface
 
-Four registration functions, called in the same order by both `execute_once()`
+Five registration functions, called in the same order by both `execute_once()`
 and `check`'s `compile()`:
 
 | Function | Registers |
@@ -249,6 +257,7 @@ and `check`'s `compile()`:
 | `register_debug` | `on_print` / `on_debug` hooks and `print_response`, all writing into the sink |
 | `register_assertions` | Every `assert_*` function |
 | `register_env` | `env`, `env_or`, `sleep_ms`, `fail` |
+| `register_teardown` | Both `on_teardown` overloads, pushing onto the per-test queue |
 
 `OutputSink` is an `Arc<Mutex<Vec<String>>>` created per test, which is how
 captured output stays per test even under a worker pool. `register_debug` is the

@@ -82,7 +82,9 @@ concurrency — it completes first, entirely.
 
 ## Timeouts
 
-A per-test timeout comes from, tightest first:
+A per-test timeout comes from, most specific first — each source overrides the
+next whatever its value, so `--timeout` can relax a test's own budget as well as
+tighten it:
 
 1. `--timeout` on the command line — wins over everything
 2. `timeout` on the `[[test]]`
@@ -137,8 +139,9 @@ outcome is reported, and the attempt count rides along:
 FAIL a [8ms] (after 3 attempts)
 ```
 
-The count also appears as `attempts` in the JSON, JSONL, and JUnit-adjacent
-reports, which makes "how flaky is this test" a query rather than a feeling.
+The count also appears as `attempts` in the JSON and JSONL reports, which makes
+"how flaky is this test" a query rather than a feeling. JUnit and TeamCity have
+no field for it, so it shows up only in the human line there.
 
 Two things to know:
 

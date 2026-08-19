@@ -137,6 +137,14 @@ demo/suite.toml::example-responds
     name:   example.com answers 200
     tags:   network, smoke
     script: demo/example_test.snag
+demo/suite.toml::json-api
+    name:   JSON body can be walked by path
+    tags:   network
+    script: demo/json_test.snag
+demo/suite.toml::assertions
+    name:   assertion helpers, no network
+    tags:   fast
+    script: demo/assertions_test.snag
 
 3 test(s)
 ```

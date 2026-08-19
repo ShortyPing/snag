@@ -168,7 +168,8 @@ Deliberately out of scope today, and all reasonable directions:
 - recorded fixtures and replay, for tests that should not hit the network
 - cookie jar and redirect policy control
 - a `--watch` mode for local development
-- richer manifest-level setup and teardown hooks
+- hook scopes wider than one test — a suite-level fixture built once and shared,
+  rather than the current per-test setup and teardown
 
 If you plan a large change, open an issue first — mostly to agree on where it
 belongs in the module layout.

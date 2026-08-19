@@ -14,7 +14,7 @@ there.
 
 ## Where registration happens
 
-Four functions, called in the same order from `runner::execute_once()` (for a
+Five functions, called in the same order from `runner::execute_once()` (for a
 real run) and `runner::compile()` (for `snag check`):
 
 ```rust
@@ -23,9 +23,10 @@ register_http(&mut engine, client);
 register_debug(&mut engine, sink.clone());
 register_assertions(&mut engine);
 register_env(&mut engine);
+register_teardown(&mut engine, teardowns.clone());
 ```
 
-If you add a fifth registration function, add it to **both** call sites —
+If you add a sixth registration function, add it to **both** call sites —
 otherwise `snag check` compiles against a different engine than the one that
 runs, which is exactly the class of bug `check` exists to prevent.
 

@@ -99,9 +99,12 @@ file = "./ping.snag"
 ```
 
 ```bash
-snag -t smoke              # tests carrying "smoke"
-snag -t smoke -t nightly   # carrying either — tags are OR-ed
+snag . -t smoke              # tests carrying "smoke"
+snag . -t smoke -t nightly   # carrying either — tags are OR-ed
 ```
+
+The `.` matters: the `run` verb is only inserted in front of a path, so a
+flags-only `snag -t smoke` is rejected by clap. `snag run -t smoke` works too.
 
 ## Step 5 — set timeouts
 
@@ -225,8 +228,11 @@ snag check            # do all manifests parse and all scripts compile?
 ```
 
 `check` compiles each script with the same engine and the same registered
-functions the runner uses, so a typo like `assert_stauts` is caught before a
-single request goes out.
+functions the runner uses, so a syntax error — or a script file that is not
+there at all — is caught before a single request goes out.
+
+It does **not** catch a typo like `assert_stauts`: Rhai resolves function names
+at call time, so an unknown function surfaces only when the test runs.
 
 ## The finished suite
 
