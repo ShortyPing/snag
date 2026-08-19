@@ -1,0 +1,184 @@
+---
+id: module-tour
+title: Module tour
+sidebar_position: 2
+description: Function-level map of every module — what each item does and where to change behaviour.
+---
+
+# Module tour
+
+A map of the crate for someone about to change it. Each section lists the items
+that matter and the reason they exist.
+
+## `src/main.rs`
+
+CLI definition and dispatch. Also the crate root, so it declares the modules.
+
+| Item | Notes |
+| --- | --- |
+| `Cli` | Top-level clap parser. Global options: `--format`, `--color`, `--verbose`, `--quiet` |
+| `Command` | `Run`, `List`, `Check`, `Init`, `Completions` |
+| `SelectionArgs` | Flattened into all three selecting commands: `paths`, `filter`, `tag`, `exclude`, `regex` |
+| `RunArgs` | `SelectionArgs` plus `jobs`, `fail_fast`, `timeout`, `retries`, `seed`, `dry_run`, `report` |
+| `ListArgs`, `CheckArgs`, `InitArgs` | The other commands' arguments |
+| `Format`, `ColorChoice` | Value enums for `--format` and `--color` |
+| `Exit` | `Ok = 0`, `TestsFailed = 1`, `Error = 2`, with `From<Exit> for ExitCode` |
+| `Ctx` | Presentation settings resolved once: format, color as a bool, verbosity, quiet |
+| `implicit_run()` | Inserts the `run` verb in front of a leading path argument |
+| `is_broken_pipe()` | Walks the error chain so `snag list \| head` exits 0 |
+| `cmd_run` / `cmd_list` / `cmd_check` / `cmd_init` / `cmd_completions` | One handler per command |
+
+`cmd_list` owns its own rendering — it does not go through `report.rs`, because
+it describes tests rather than results.
+
+`cmd_init` holds the two scaffold templates as `const &str`.
+
+**Change here when:** adding a flag, a command, or altering how argv is
+rewritten.
+
+## `src/discovery.rs`
+
+Turns paths into a filtered list of tests.
+
+| Item | Notes |
+| --- | --- |
+| `discover()` | The shared entry point. Errors when no suite files were found |
+| `suite_files()` | Paths/globs/directories → sorted, de-duplicated manifest paths |
+| `is_glob()` | True when the string contains `*`, `?`, or `[` |
+| `is_suite_file()` | `suite.toml`, `snag.toml`, `*.snag.toml` — applied only while walking |
+| `walk_for_suites()` | `walkdir` recursion, skipping dot-dirs and `IGNORED_DIRS`, no symlinks |
+| `IGNORED_DIRS` | `target`, `node_modules`, `dist`, `build`, `.venv` |
+| `describe_search()` | Builds the "looked for …" half of the not-found error |
+| `Filter` | Holds include, exclude, and tags; `accepts()` applies them in that order |
+| `Matcher` | `Substrings(Vec<String>)` or `Regexes(RegexSet)` |
+
+`Filter::accepts()` matches against `[test.name, test.id]`, which is why `-k`
+finds either.
+
+**Change here when:** adding a discovery convention, a filter dimension, or a
+new ignored directory.
+
+## `src/manifest.rs`
+
+Schema and resolution.
+
+| Item | Notes |
+| --- | --- |
+| `Manifest` | `title`, `variables`, `timeout`, `tests` (renamed from `test`). `deny_unknown_fields` |
+| `TestDefinition` | `id`, `name`, `parallel_safe`, `tags`, `timeout`, `file`, `variables`. `deny_unknown_fields` |
+| `Test` | The resolved form the rest of the crate uses |
+| `Test::qualified_id()` | `format!("{}::{}", suite_path.display(), id)` |
+| `load_suite()` | Read → parse → resolve, rejecting duplicate ids |
+| `normalize()` | Drops `.` components, leaves `..` alone |
+| `default_title()` | `"Untitled suite"` |
+
+Variables are `BTreeMap<String, String>`, so ordering is deterministic and
+values are always strings.
+
+**Change here when:** adding a manifest field. Remember `deny_unknown_fields`
+means old binaries reject manifests using a new field — a versioning
+consideration, not just a schema one.
+
+## `src/runner.rs`
+
+Execution.
+
+| Item | Notes |
+| --- | --- |
+| `run()` | Builds the reporter, shuffles, partitions, runs both phases, returns the exit |
+| `check()` | Compiles every script; prints per-test results; bails with a count |
+| `compile()` | Registers the same functions the runner does, then `engine.compile()` |
+| `build_reporter()` | Plain reporter, or a `Multi` when `--report` is given |
+| `jobs()` | `0` → `available_parallelism()`, else the requested count |
+| `Event` | `Started(Test)` / `Finished(Box<Outcome>)` |
+| `execute_batch()` | The worker pool and the event loop |
+| `execute()` | Retry wrapper; owns `attempts` and the total duration |
+| `execute_once()` | One attempt: read, build client and engine, run, classify |
+| `Failure` | `TimedOut` or `Error(String)` |
+| `classify()` | Distinguishes a timeout from a genuine script failure |
+| `shuffle()` | Fisher-Yates over a seeded xorshift64 — deterministic, no rng dependency |
+| `PROGRESS_INTERVAL` | `2_000` operations between deadline checks |
+
+`build_reporter()` is where `--format human --report FILE` becomes JSON in the
+file: a human report in a file would be useless to a tool.
+
+**Change here when:** touching scheduling, retries, timeouts, or cancellation.
+`execute_batch` has a dedicated test module — extend it alongside any change.
+
+## `src/report.rs`
+
+Statuses, the reporter trait, and the five formats.
+
+| Item | Notes |
+| --- | --- |
+| `Status` | `Passed`, `Failed`, `TimedOut`, `Skipped`, plus `as_str()` and `is_failure()` |
+| `Outcome` | Test, status, message, duration, attempts, captured output |
+| `Summary` | Four counters plus duration; `record()`, `total()`, `is_green()` |
+| `Reporter` | Four methods, all defaulting to no-ops |
+| `Multi` | Broadcasts every event to a `Vec<Box<dyn Reporter>>` |
+| `reporter_for()` | Factory from `Format` to a boxed reporter |
+| `Human` | Streaming lines, a failure digest, and the summary |
+| `Jsonl` | One object per test, flushed; summary object last |
+| `Json` | Buffers, emits `snag.run/v1` in `run_finished` |
+| `TeamCity` | Service messages; `tc_escape()` handles the spec's escapes |
+| `Junit` | Buffers, emits XML; `xml_escape()` also strips illegal control characters |
+| `outcome_json()` / `summary_json()` | Shared by `Jsonl` and `Json`, so the two cannot drift |
+| `fmt_duration()` | `<1s` → `123ms`, otherwise `1.50s` |
+
+**Change here when:** adding a format or a field. Adding a field to
+`outcome_json()` updates JSON and JSONL together; JUnit and TeamCity need their
+own edit.
+
+## `src/scripting_registration.rs`
+
+The script-visible surface.
+
+| Item | Notes |
+| --- | --- |
+| `OutputSink` | `Arc<Mutex<Vec<String>>>`, one per test |
+| `new_sink()` / `push()` | Create and append, ignoring a poisoned lock |
+| `ReqBuilder` | Method, URL, headers, optional body, and a cloned client |
+| `Response` | Status, text, headers, duration |
+| `register_http()` | Verbs, builder methods, `send`, accessors, `field`, `basic` |
+| `register_debug()` | `on_print`, `on_debug`, `print_response` |
+| `register_assertions()` | Every `assert_*`; `eq_result()` builds the message |
+| `register_env()` | `env`, `env_or`, `sleep_ms`, `fail` |
+| `dig()` | Backs `field()`; walks maps and arrays by dotted path |
+| `json_to_dynamic()` / `dynamic_to_json_string()` | serde bridges for `res.json()` and `.json(value)` |
+| `truncate()` | Caps bodies in messages at 500 chars, appending the byte total |
+
+Builder methods take `ReqBuilder` **by value** and return it, which is what makes
+`get(url).header(…).bearer(…).send()` chain in Rhai.
+
+`register_type_with_name::<ReqBuilder>("Request")` exists so error messages say
+`Request`, not a Rust path.
+
+**Change here when:** adding a script function. See
+[extending the script API](./extending-the-script-api.mdx).
+
+## Dependencies
+
+| Crate | Used for |
+| --- | --- |
+| `clap` + `clap_complete` | CLI parsing and completions |
+| `anyhow` | Error propagation with context |
+| `thiserror` | Declared; error types are currently `anyhow`-based |
+| `serde` + `toml` + `serde_json` | Manifest parsing and report serialisation |
+| `humantime` + `humantime-serde` | Duration parsing on the CLI and in manifests |
+| `rhai` | The scripting engine (`serde` and `serde_json` features) |
+| `reqwest` (blocking) | HTTP |
+| `regex` | `--regex` filters, via `RegexSet` |
+| `glob` + `walkdir` | Path expansion and directory walking |
+| `base64` | `basic()` |
+
+## Where to make a change
+
+| Goal | File |
+| --- | --- |
+| New CLI flag | `main.rs` (and the consuming module) |
+| New manifest field | `manifest.rs`, then wherever `Test` is consumed |
+| New discovery rule | `discovery.rs` |
+| New script function | `scripting_registration.rs` |
+| New assertion | `scripting_registration.rs`, `register_assertions` |
+| New output format | `report.rs` plus the `Format` enum in `main.rs` |
+| Scheduling / retries / timeouts | `runner.rs` |

@@ -1,0 +1,244 @@
+---
+id: execution-model
+title: Execution model
+sidebar_position: 5
+description: Phases, worker pools, timeouts, retries, fail-fast, and deterministic shuffling — what happens between selection and the report.
+---
+
+# Execution model
+
+Once discovery and filtering have produced a list of tests, `run` executes them
+in a fixed sequence. This page describes that sequence and every flag that
+changes it.
+
+## The shape of a run
+
+```
+discover  →  filter  →  [shuffle]  →  split serial / parallel
+                                          │
+                    ┌─────────────────────┴─────────────────────┐
+                    │  phase 1: parallel_safe = false, 1 worker │
+                    └─────────────────────┬─────────────────────┘
+                    ┌─────────────────────┴─────────────────────┐
+                    │  phase 2: everything else, N workers      │
+                    └─────────────────────┬─────────────────────┘
+                                          │
+                            events → reporter (single thread)
+                                          │
+                                       summary
+```
+
+Both phases share one cancel flag, so `--fail-fast` tripped in phase 1 also
+skips phase 2.
+
+## Ordering
+
+Within a phase, tests are taken in list order — manifest order, suite by suite,
+suites sorted by path. With several workers, *start* order follows that list but
+*finish* order does not, so report lines interleave by completion.
+
+`--seed N` shuffles the whole list before the split, using a seeded xorshift so
+the same seed always produces the same order. It is the tool for smoking out
+tests that only pass because a neighbour ran first:
+
+```bash
+snag run --seed 1234        # reproducible shuffle
+snag run --seed $RANDOM     # a different order every night
+```
+
+Shuffling changes order, not grouping: serial tests still run first.
+
+## Parallelism
+
+```bash
+snag run -j 4     # four workers
+snag run -j 1     # fully serial, deterministic order
+snag run -j 0     # default: one worker per logical CPU
+```
+
+The pool is a set of scoped threads pulling from a shared index. Each worker
+builds its **own** HTTP client and its **own** interpreter for every test, so
+nothing is shared between tests except the cancel flag: no cookie jar, no
+connection pool, no scope.
+
+Worker count is clamped to the number of tests in the phase — asking for 32
+workers to run 2 tests spawns 2.
+
+### Serial tests
+
+```toml
+[[test]]
+id = "reset-fixtures"
+parallel_safe = false     # default is true
+file = "./reset.snag"
+```
+
+Every `parallel_safe = false` test runs in phase 1, one at a time, before any
+parallel test starts. Use it for tests that mutate shared state, depend on a
+global fixture, or hit an endpoint that rate-limits aggressively.
+
+Note the granularity: phase 1 does not run *alongside* phase 2 at reduced
+concurrency — it completes first, entirely.
+
+## Timeouts
+
+A per-test timeout comes from, tightest first:
+
+1. `--timeout` on the command line — wins over everything
+2. `timeout` on the `[[test]]`
+3. `timeout` on the suite
+4. nothing: the test may run indefinitely
+
+The value is applied in two places:
+
+- **The HTTP client** is built with that timeout, so a hung socket ends the
+  request.
+- **The interpreter** gets a progress hook that checks a deadline every 2,000
+  operations, so a runaway loop between requests is interrupted too.
+
+Either path produces status `timed_out`:
+
+```console
+$ snag run -k "step 2" --timeout 1s
+running 1 test across 1 suite
+TIME cart step 2 [1.01s]
+
+failures:
+
+  cart step 2 (./suite.toml::t2)
+    timed out after 1.00s
+
+test result: FAILED. 0 passed; 0 failed; 1 timed out; 0 skipped; finished in 1.01s
+```
+
+The human reporter marks a timeout `TIME`, not `FAIL`, and the summary counts it
+in its own column.
+
+A timed-out test is a failure for exit-code purposes: `is_green()` is false when
+`timed_out > 0`.
+
+:::note Why the check is periodic
+Rhai's `on_progress` hook fires per operation; checking the clock every time
+would dominate the cost of a small script. Snag checks every 2,000 operations,
+so a timeout can overshoot slightly on a tight loop. It cannot overshoot on a
+blocked socket — the client timeout covers that case.
+:::
+
+## Retries
+
+```bash
+snag run --retries 2      # up to 3 attempts total
+```
+
+A test is retried while it fails and attempts remain. Only the final attempt's
+outcome is reported, and the attempt count rides along:
+
+```console
+FAIL a [8ms] (after 3 attempts)
+```
+
+The count also appears as `attempts` in the JSON, JSONL, and JUnit-adjacent
+reports, which makes "how flaky is this test" a query rather than a feeling.
+
+Two things to know:
+
+- The whole script re-runs, including any setup it does. A script that creates a
+  resource will create it again.
+- `duration` covers **all** attempts, not just the last one.
+
+Retries hide flakiness by design. Use them to keep a pipeline moving, and treat a
+high `attempts` value in the report as a bug to fix, not a state to live in.
+
+## Fail-fast
+
+```bash
+snag run --fail-fast
+```
+
+When a test fails or times out, a shared cancel flag is set. Every test not yet
+started is reported as **skipped**, with the message
+`skipped after an earlier failure`:
+
+```console
+$ snag run --fail-fast -j 1
+running 4 tests across 1 suite
+FAIL cart step 1 [28ms]
+SKIP cart step 2 [0ms]
+SKIP cart step 3 [0ms]
+SKIP cart step 4 [0ms]
+
+failures:
+
+  cart step 1 (./suite.toml::t1)
+    Runtime error: cart service unavailable (line 1, position 1)
+
+test result: FAILED. 0 passed; 1 failed; 0 timed out; 3 skipped; finished in 29ms
+```
+
+Draining rather than dropping means the report still accounts for every selected
+test — a JUnit consumer sees four test cases, not one.
+
+With multiple workers, tests already in flight when the flag is set run to
+completion, so a failing `-j 8` run typically reports a few more results than a
+`-j 1` run would. This is inherent to a worker pool, not a bug to work around.
+
+## Dry runs
+
+```bash
+snag run --dry-run
+```
+
+Nothing is executed. Every selected test is reported as skipped with the message
+`dry run`, through the ordinary reporter — so `--dry-run --format junit`
+produces a valid report describing the shape of the run.
+
+```console
+$ snag demo/suite.toml --dry-run
+running 3 tests across 1 suite
+SKIP example.com answers 200 [0ms]
+SKIP JSON body can be walked by path [0ms]
+SKIP assertion helpers, no network [0ms]
+
+test result: ok. 0 passed; 0 failed; 0 timed out; 3 skipped; finished in 0ms
+```
+
+Skipped tests carry the message `dry run` in machine reports, so a consumer can
+tell a dry run apart from a fail-fast drain.
+
+## Statuses
+
+| Status | Meaning | Counts as failure |
+| --- | --- | --- |
+| <span className="pill pill--pass">passed</span> | The script finished without throwing | no |
+| <span className="pill pill--fail">failed</span> | An assertion failed, or the script threw | yes |
+| <span className="pill pill--fail">timed_out</span> | The client or the interpreter hit the deadline | yes |
+| <span className="pill pill--skip">skipped</span> | Dry run, or drained after a fail-fast trip | no |
+
+The run is green when `failed == 0 && timed_out == 0`. Skipped tests never turn
+a run red — which is worth remembering when combining `--fail-fast` with a
+required CI check: the *failure* makes it red, not the skips.
+
+## What a worker actually does per test
+
+1. Take the next index from the shared counter. Stop when the list is exhausted.
+2. If the cancel flag is set, emit a skipped outcome and continue.
+3. Emit `Started`.
+4. Read the script from disk. A missing file fails the test — it is not a run
+   error.
+5. Build an HTTP client (with the timeout, if any) and a fresh Rhai engine, and
+   register the HTTP, assertion, debug, and env functions.
+6. Push the test's variables into the scope as constants.
+7. Run the script, capturing `print`/`debug` into a per-test buffer.
+8. Classify the result: ok, timed out, or failed with a message.
+9. Retry from step 4 if the test failed and attempts remain.
+10. Emit `Finished` with the outcome.
+
+Events go over a channel to the main thread, which is the only thread that
+touches the reporter. That is why output never interleaves, and why a custom
+reporter does not need to be thread-safe.
+
+## Next
+
+- [Reporters](./reporters.mdx) — what comes out the other end
+- [Architecture](../internals/architecture.mdx) — the same pipeline, in code
+- [CLI reference](../reference/cli.mdx)

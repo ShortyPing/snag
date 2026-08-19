@@ -1,0 +1,213 @@
+---
+id: manifest
+title: Suite manifest reference
+sidebar_position: 2
+description: Every field of a suite TOML file — types, defaults, precedence, and validation rules.
+---
+
+# Suite manifest reference
+
+A suite manifest is a TOML file named `suite.toml`, `snag.toml`, or
+`*.snag.toml` (any name works when passed explicitly on the command line).
+
+```toml title="suite.toml"
+title = "Checkout API"
+timeout = "10s"
+
+[variables]
+base_url = "https://api.example.com"
+
+[[test]]
+id = "cart-create"
+name = "POST /carts creates a cart"
+tags = ["smoke", "checkout"]
+parallel_safe = true
+timeout = "20s"
+file = "./checkout/cart_create.snag"
+
+[test.variables]
+currency = "USD"
+```
+
+## Top level
+
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `title` | string | `"Untitled suite"` | Suite label. Appears in reports — JUnit `classname`, TeamCity suite name, the JSON `suite` field |
+| `timeout` | duration string | none | Default per-test timeout for this file |
+| `variables` | table of string → string | `{}` | Variables shared by every test in the file |
+| `test` | array of tables | `[]` | The tests, written as repeated `[[test]]` blocks |
+
+An empty manifest is valid and contributes zero tests.
+
+## `[[test]]`
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| `id` | string | **yes** | — | Identifier, unique within the file |
+| `file` | path | **yes** | — | Script path, relative to this manifest |
+| `name` | string | no | the `id` | Human-readable label used by reporters |
+| `tags` | array of strings | no | `[]` | Selection tags, matched exactly by `-t` |
+| `timeout` | duration string | no | the suite `timeout` | Per-test timeout |
+| `parallel_safe` | bool | no | `true` | `false` pins the test to the serial phase |
+| `variables` | table of string → string | no | `{}` | Overrides of suite variables, for this test only |
+
+`[test.variables]` attaches to the `[[test]]` block directly above it — that is
+ordinary TOML table scoping, and the most common place to get a manifest subtly
+wrong. `snag list --long` shows what was actually parsed.
+
+## Types
+
+### Duration strings
+
+Parsed with [humantime](https://docs.rs/humantime). A unit is mandatory.
+
+| Valid | Meaning |
+| --- | --- |
+| `"500ms"` | 500 milliseconds |
+| `"30s"` | 30 seconds |
+| `"2m"` | 2 minutes |
+| `"1m 30s"` | 90 seconds |
+
+`"10"` is not a duration and fails the parse.
+
+### Variables
+
+Both `[variables]` and `[test.variables]` are flat maps of string to **string**.
+Numbers, booleans, arrays, and nested tables are not accepted — quote the value
+and convert in the script:
+
+```toml
+[variables]
+max_latency_ms = "800"
+```
+
+```js
+assert_faster_than(res, max_latency_ms.parse_int());
+```
+
+### Paths
+
+`file` is resolved relative to the **directory containing the manifest**, never
+relative to the shell's working directory. `.` components are stripped for
+display; `..` is preserved as written.
+
+```toml title="tests/auth.snag.toml"
+file = "./login.snag"          # → tests/login.snag
+file = "scripts/login.snag"    # → tests/scripts/login.snag
+file = "../shared/ping.snag"   # → tests/../shared/ping.snag
+```
+
+A `file` that does not exist is not a manifest error: the test runs and **fails**
+with `script … does not exist`, so one broken path does not take down the run.
+
+## Validation
+
+Enforced at load time, before anything executes:
+
+| Rule | Failure |
+| --- | --- |
+| Unknown fields are rejected (`deny_unknown_fields`) | `Error: parsing suite <path>`, exit 2 |
+| `id` and `file` must be present | `Error: parsing suite <path>`, exit 2 |
+| `timeout` must be a valid duration | `Error: parsing suite <path>`, exit 2 |
+| Ids must be unique within a file | `duplicate test id 'x' in <path>`, exit 2 |
+
+Common rejected typos: `tag` (should be `tags`), `script` (should be `file`),
+`parallel-safe` (should be `parallel_safe`), `variable` (should be `variables`).
+
+:::note The parse error does not include the TOML detail
+Today the message is only `Error: parsing suite <path>` — the underlying reason
+is not printed. To narrow it down, validate the file with any TOML parser, or
+comment out `[[test]]` blocks until `snag list` succeeds.
+:::
+
+## Precedence
+
+**Variables** — a test's key wins over the suite's key. Flat, per key, no deep
+merge:
+
+```
+[variables]  →  [test.variables]
+```
+
+**Timeouts** — tightest wins:
+
+```
+suite timeout  →  test timeout  →  --timeout
+```
+
+**Parallelism** — `parallel_safe = false` always means the serial phase; `-j`
+only sizes the pool for the parallel phase.
+
+## Resolved test
+
+What the runner sees after a manifest is loaded, one per `[[test]]`:
+
+| Property | Origin |
+| --- | --- |
+| `id` | `id` |
+| `name` | `name`, else `id` |
+| `tags` | `tags` |
+| `timeout` | test `timeout`, else suite `timeout` |
+| `parallel_safe` | `parallel_safe`, else `true` |
+| `script` | `file`, joined to the manifest's directory and normalised |
+| `vars` | suite `variables` merged with test `variables` |
+| `suite_title` | `title` |
+| `suite_path` | the manifest path as discovered |
+| qualified id | `<suite_path>::<id>` |
+
+The qualified id embeds the path *as discovered*: `snag` from the repository root
+produces `./suite.toml::cart-create`, while `snag suite.toml` produces
+`suite.toml::cart-create`. Keep one invocation in CI if a dashboard keys on it.
+
+## Full example
+
+```toml title="tests/checkout.snag.toml"
+title = "Checkout API"
+timeout = "10s"
+
+[variables]
+base_url = "https://staging.api.example.com"
+currency = "EUR"
+tenant_id = "tenant-test-001"
+
+# Runs alone, before every parallel test.
+[[test]]
+id = "reset-fixtures"
+name = "fixtures are reset"
+tags = ["fixtures"]
+parallel_safe = false
+timeout = "60s"
+file = "./checkout/reset.snag"
+
+[[test]]
+id = "cart-create"
+name = "POST /carts creates a cart"
+tags = ["smoke", "checkout"]
+file = "./checkout/cart_create.snag"
+
+[[test]]
+id = "cart-create-usd"
+name = "POST /carts honours a non-default currency"
+tags = ["checkout"]
+file = "./checkout/cart_create.snag"
+
+[test.variables]
+currency = "USD"
+
+[[test]]
+id = "report-generate"
+name = "report generation finishes"
+tags = ["slow"]
+timeout = "120s"
+file = "./checkout/report.snag"
+```
+
+Note that `cart-create` and `cart-create-usd` share one script and differ only in
+a variable — the cheapest way to cover a matrix.
+
+## See also
+
+- [Suite files and discovery](../guides/suite-files.mdx)
+- [Variables and secrets](../guides/variables-and-secrets.mdx)
+- [Script API](./script-api.mdx)

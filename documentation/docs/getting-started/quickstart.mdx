@@ -1,0 +1,183 @@
+---
+id: quickstart
+title: Quickstart
+sidebar_position: 2
+description: Scaffold a suite, run it, read the report, and make a test fail on purpose.
+---
+
+# Quickstart
+
+About a minute from an empty directory to a green run, and then a red one — the
+red run is the part worth looking at.
+
+## 1. Scaffold a suite
+
+```bash
+mkdir api-tests && cd api-tests
+snag init
+```
+
+`snag init` writes two files:
+
+```console
+created suite.toml and ./get_status.snag
+run it with: snag suite.toml
+```
+
+```toml title="suite.toml"
+title = "Example suite"
+
+[variables]
+base_url = "https://httpbin.org"
+
+[[test]]
+id = "get-status"
+name = "GET /status/200 returns 200"
+tags = ["smoke"]
+timeout = "10s"
+file = "./get_status.snag"
+
+[test.variables]
+expected = "200"
+```
+
+```js title="get_status.snag"
+let res = get(`${base_url}/status/200`).send();
+
+assert_status(res, 200);
+assert_faster_than(res, 5000);
+```
+
+`snag init` refuses to overwrite an existing `suite.toml`; pass `--force` when
+that is what you want. It also takes a path, so `snag init tests/api.snag.toml`
+scaffolds into a subdirectory.
+
+## 2. See what would run
+
+`list` performs discovery and filtering without executing anything:
+
+```console
+$ snag list --long
+./suite.toml::get-status
+    name:   GET /status/200 returns 200
+    tags:   smoke
+    script: get_status.snag
+
+1 test(s)
+```
+
+`check` goes one step further: it parses every manifest and compiles every
+script, without opening a socket. It is the fastest way to catch a syntax error.
+
+```console
+$ snag check -v
+ok: ./suite.toml::get-status
+checked 1 test(s): no errors
+```
+
+## 3. Run it
+
+The `run` verb is implicit, so bare `snag` runs every suite it finds under the
+current directory:
+
+```console
+$ snag
+running 1 test across 1 suite
+PASS GET /status/200 returns 200 [284ms]
+
+test result: ok. 1 passed; 0 failed; 0 timed out; 0 skipped; finished in 285ms
+```
+
+## 4. Make it fail
+
+Change the assertion so it expects the wrong status:
+
+```diff title="get_status.snag"
+-assert_status(res, 200);
++assert_status(res, 201);
+```
+
+```console
+$ snag
+running 1 test across 1 suite
+FAIL GET /status/200 returns 200 [231ms]
+
+failures:
+
+  GET /status/200 returns 200 (./suite.toml::get-status)
+    Runtime error: assertion failed: expected status 201, got 200
+    body:  (line 3, position 1)
+
+test result: FAILED. 0 passed; 1 failed; 0 timed out; 0 skipped; finished in 232ms
+```
+
+Three things to note, because they hold for every failure:
+
+- The failure block repeats the test's **qualified id** (`./suite.toml::get-status`),
+  which is the string every machine-readable report uses too.
+- The message carries the expected *and* actual value, plus the script position.
+- The process exits **1**. A run that could not start at all — a bad glob, an
+  unparseable manifest — exits **2**, so CI can tell "your API is broken" from
+  "your test setup is broken". See [exit codes](../reference/exit-codes.mdx).
+
+## 5. Add a second test
+
+Tests are entries in the same file. Give each one an id that is unique within
+the suite:
+
+```toml title="suite.toml"
+[[test]]
+id = "post-echo"
+name = "POST /post echoes the body"
+tags = ["smoke"]
+file = "./post_echo.snag"
+```
+
+```js title="post_echo.snag"
+let res = post(`${base_url}/post`)
+    .json(#{ project: "snag", ok: true })
+    .send();
+
+assert_ok(res);
+
+let body = res.json();
+assert_eq(field(body, "json.project"), "snag");
+assert_eq(field(body, "json.ok"), true);
+```
+
+Both tests now run in parallel across a worker pool sized to your CPU count:
+
+```console
+$ snag
+running 2 tests across 1 suite
+PASS GET /status/200 returns 200 [268ms]
+PASS POST /post echoes the body [291ms]
+
+test result: ok. 2 passed; 0 failed; 0 timed out; 0 skipped; finished in 294ms
+```
+
+## 6. Useful flags on day one
+
+```bash
+snag run -k echo             # only tests whose name or id contains "echo"
+snag run -t smoke            # only tests tagged smoke
+snag run -j 1                # one worker, deterministic ordering
+snag run --fail-fast         # stop after the first failure, skip the rest
+snag run --retries 2         # give a flaky test two more chances
+snag . -v                    # show captured output for passing tests too
+snag . --format junit --report report.xml   # human on the terminal, JUnit in a file
+```
+
+:::caution `run` is implicit only in front of a path
+Snag inserts the `run` verb when the first non-flag argument is not a known
+verb — `snag demo/suite.toml` becomes `snag run demo/suite.toml`. An invocation
+made of **flags only** has no such argument, so `snag -t smoke` is rejected with
+`unexpected argument '-t' found`. Write `snag run -t smoke`, or give a path:
+`snag . -t smoke`. The global flags `-f/--format`, `--color`, `-v`, and `-q` work
+either way.
+:::
+
+## Next
+
+[Your first suite](./your-first-suite.mdx) builds a suite from scratch against a
+real API, and explains each field as it appears.

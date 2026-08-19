@@ -1,0 +1,292 @@
+---
+id: troubleshooting
+title: Troubleshooting
+sidebar_position: 8
+description: Error messages you may hit, what causes them, and how to fix them.
+---
+
+# Troubleshooting
+
+Errors are grouped by where they come from: the command line, discovery, the
+manifest, the script, or the network.
+
+## Command line
+
+### `error: unexpected argument '-t' found`
+
+```console
+$ snag -t smoke
+error: unexpected argument '-t' found
+```
+
+`-t`, `-k`, `-e`, `-j`, `--retries`, `--timeout`, `--fail-fast`, `--dry-run`,
+and `--report` belong to a **verb**. The `run` verb is inserted automatically
+only when the first non-flag argument is a path, so a flags-only invocation has
+nothing to trigger it.
+
+```bash
+snag run -t smoke     # name the verb
+snag . -t smoke       # or give a path
+```
+
+Global flags (`-f/--format`, `--color`, `-v`, `-q`) work in either position.
+
+### A glob matched nothing, or the wrong thing
+
+```bash
+snag 'tests/*.snag.toml'    # quoted: Snag expands it
+snag tests/*.snag.toml      # unquoted: your shell expands it first
+```
+
+Quote the pattern. An unquoted pattern that matches nothing is passed through
+literally by most shells, producing `path does not exist`.
+
+## Discovery
+
+### `no suite files found`
+
+```console
+Error: no suite files found (looked for suite.toml / snag.toml / *.snag.toml under the current directory). Run `snag init` to create one.
+```
+
+Exit code 2. Causes, in order of likelihood:
+
+1. The file is not named `suite.toml`, `snag.toml`, or `*.snag.toml`. Rename it,
+   or name it explicitly on the command line — that bypasses the convention.
+2. It lives under a skipped directory: anything starting with `.`, or `target`,
+   `node_modules`, `dist`, `build`, `.venv`.
+3. It is behind a symlink. Symlinks are not followed.
+4. You are in the wrong directory.
+
+```bash
+snag list .                 # what does discovery actually see?
+snag list weird-name.toml   # bypass the naming convention
+```
+
+### `path does not exist: …`
+
+The literal path was not found. Watch for a shell-expanded glob that matched
+nothing, or a path relative to the repository root while your shell sits
+somewhere else.
+
+## Manifest
+
+### `Error: parsing suite …`
+
+```console
+$ snag list
+Error: parsing suite ./suite.toml
+```
+
+Exit code 2. Every manifest problem surfaces with this one line — the underlying
+TOML error is not printed today, so the cause has to be narrowed by hand. In
+order of likelihood:
+
+1. **An unknown field.** Manifests are parsed with unknown fields *denied*, so a
+   typo is an error rather than a silently ignored key. Common ones: `tag`
+   instead of `tags`, `script` instead of `file`, `parallel-safe` instead of
+   `parallel_safe`, `variable` instead of `variables`.
+2. **A missing required field.** `id` and `file` are the only mandatory keys on
+   a `[[test]]`; everything else has a default.
+3. **A bad duration.** `timeout` needs a unit — `"10s"`, not `"10"`.
+4. **Invalid TOML.** Check the file with any TOML parser, e.g.
+   `python3 -c 'import tomllib,sys; tomllib.load(open(sys.argv[1],"rb"))' suite.toml`.
+
+Bisecting also works: comment out `[[test]]` blocks until `snag list` succeeds.
+
+### `duplicate test id 'x' in …`
+
+Ids must be unique **within a file**. They may repeat across files — the
+qualified id keeps them apart.
+
+### Durations
+
+Durations use [humantime](https://docs.rs/humantime) syntax and need a unit:
+`"10s"`, `"500ms"`, `"2m"`. A bare `"10"` fails the manifest parse.
+
+### A `[test.variables]` block attached to the wrong test
+
+```toml
+[[test]]
+id = "a"
+file = "./a.snag"
+
+[test.variables]     # belongs to test "a" — the one directly above
+base_url = "https://a"
+
+[[test]]
+id = "b"
+file = "./b.snag"
+```
+
+TOML tables attach to the most recent `[[test]]`. Keep each block immediately
+under its test, and let `snag list --long` confirm what was parsed.
+
+## Scripts
+
+### `script … does not exist`
+
+The test **fails** (it does not abort the run) with the path Snag resolved.
+`file` is relative to the **manifest**, not to your shell:
+
+```toml title="tests/auth.snag.toml"
+file = "./auth/login.snag"   # → tests/auth/login.snag
+```
+
+`snag list --long` prints the resolved script path for every test.
+
+### `Variable not found: base_url`
+
+The script used an identifier that no variable defines. Either add it to
+`[variables]` (suite-wide) or `[test.variables]` (one test), or read it from the
+environment with `env_or("NAME", "default")`.
+
+### `Cannot modify constant base_url`
+
+Manifest variables are pushed into scope as constants. Copy before mutating:
+
+```js
+let host = base_url;          // now it is yours
+if env_or("STAGE", "") == "prod" { host = "https://api.example.com"; }
+```
+
+This is a runtime error, not a compile error — `snag check` will not catch it.
+
+### `Function not found: assert_stauts (i64, i64)`
+
+A typo, or a function that does not exist. Rhai resolves function names at
+**call time**, so this surfaces when the test runs — `snag check` compiles the
+script but cannot catch it. The signature in the message shows the argument
+types Snag tried to match, which is also how you spot passing a string where an
+integer was expected.
+
+`snag check` *does* catch syntax errors, before any request goes out:
+
+```console
+$ snag check
+error: ./suite.toml::a: Unexpected ';' (line 1, position 9) (a.snag)
+Error: 1 of 1 test(s) failed to compile
+```
+
+### `response body is not valid JSON: …`
+
+`res.json()` was called on a body that is not JSON — very often an HTML error
+page from a proxy. Look at what actually came back:
+
+```js
+print(`status ${res.status}`);
+print(res.text);
+assert_ok(res);          // assert the status *before* decoding
+```
+
+Asserting the status first turns "not valid JSON" into the far more useful
+"expected status 200, got 502".
+
+### `no key 'x' in path 'a.b.x'` / `index 3 out of range in path …`
+
+`field()` reports the exact segment that failed. Print the decoded body to see
+its real shape:
+
+```js
+print(res.text);
+```
+
+Remember numeric segments index arrays: `field(body, "items.0.sku")`.
+
+### `cannot descend into 'x': value is not an object or array`
+
+The path ran into a scalar partway down — usually one level too deep, or an
+object where the API returns an array.
+
+### An `assert_eq` that "should" match
+
+`assert_eq` is registered per scalar type: integer, float, bool, string. There
+is no map or array overload, and no implicit numeric conversion between integer
+and float. Compare the fields you care about:
+
+```js
+assert_eq(field(body, "total"), 3);           // integer
+assert_eq(field(body, "ratio"), 0.5);         // float
+assert_eq(field(body, "name"), "snag");       // string
+```
+
+## Network and timing
+
+### `request failed: …`
+
+The request never completed: DNS failure, connection refused, TLS error, or the
+client timeout firing. The underlying `reqwest` error is included — read the
+tail of it, that is where the cause is.
+
+In a container, `error trying to connect: … certificate` almost always means
+`ca-certificates` is missing from the image.
+
+### `timed out after 10.00s`
+
+The test hit its deadline. Which deadline, in precedence order: `--timeout`,
+then the test's `timeout`, then the suite's. Raise the right one, or find out
+why the endpoint got slower:
+
+```js
+print(`took ${res.duration_ms}ms`);
+```
+
+A timeout can overshoot slightly on a tight compute loop — the interpreter
+checks the clock every 2,000 operations — but never on a blocked socket.
+
+### A test passes alone and fails in parallel
+
+Shared state. Options, cheapest first:
+
+1. Mark the test `parallel_safe = false` so it runs alone in phase 1.
+2. Give it its own fixture — a unique id, tenant, or namespace per run.
+3. Reproduce with `snag run -j 1` to confirm the diagnosis, and with
+   `--seed N` to check for order-dependence.
+
+### A test is flaky
+
+`--retries N` keeps the pipeline moving and records the attempt count:
+
+```console
+FAIL a [8ms] (after 3 attempts)
+```
+
+Watch `attempts` in the JSON report over time. A test that regularly needs a
+second attempt is reporting a real problem — in the API, or in the test's
+assumptions about timing.
+
+## Output
+
+### Colors are mangled in CI logs
+
+```bash
+snag tests/ --color never
+```
+
+Auto-detection assumes ANSI support when stdout is a TTY, which some CI
+environments report inaccurately.
+
+### The report file is empty or missing
+
+`json` and `junit` buffer everything and write in `run_finished`, so a run killed
+mid-flight leaves nothing. Use `jsonl`, which flushes per test, when you need
+partial results from an interrupted run.
+
+### `cannot write report to …`
+
+The parent directory does not exist, or is not writable. Snag creates the file,
+not the directory. This is exit code 2, checked **before** any test runs.
+
+## Getting more detail
+
+```bash
+snag list --long                  # what discovery resolved, per test
+snag check -v                     # per-test compile results
+snag run -j 1 -k "one test"       # isolate, serially
+snag run -v                       # captured output for passing tests too
+snag . -f jsonl | jq              # the machine view of the same run
+```
+
+Still stuck? Open an issue at
+[github.com/ShortyPing/snag](https://github.com/ShortyPing/snag/issues) with the
+manifest, the script, and the output of `snag list --long`.

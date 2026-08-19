@@ -1,0 +1,114 @@
+---
+id: exit-codes
+title: Exit codes
+sidebar_position: 5
+description: What each exit status means, which conditions produce it, and how CI should react.
+---
+
+# Exit codes
+
+```rust
+pub enum Exit {
+    Ok = 0,
+    TestsFailed = 1,
+    Error = 2,
+}
+```
+
+| Code | Name | Meaning |
+| --- | --- | --- |
+| `0` | Ok | Everything selected passed — or nothing was selected |
+| `1` | TestsFailed | At least one test failed or timed out |
+| `2` | Error | The run could not be completed |
+
+The distinction between 1 and 2 is the useful part: **1 is a finding about your
+API, 2 is a problem with the run itself.**
+
+## `0` — success
+
+Produced when the run finishes and `failed == 0 && timed_out == 0`. Skipped
+tests do not affect it, so all of these exit 0:
+
+- every test passed
+- a filter matched nothing (`snag run -t nonexistent`)
+- `--dry-run`, where everything is skipped
+- `--fail-fast` skipped the remainder — provided the run had no failure, which
+  in practice means the flag never tripped
+
+Non-`run` commands exit 0 on success: `list` after printing, `check` when
+everything compiles, `init` after writing, `completions` after generating.
+
+A closed stdout pipe is deliberately treated as success — `snag list | head`
+exits 0 rather than reporting a broken pipe.
+
+## `1` — tests failed
+
+At least one test ended `failed` or `timed_out`:
+
+- an assertion failed
+- the script threw, including `fail(...)`
+- a request could not be completed (DNS, connection refused, TLS)
+- the script file did not exist
+- the test hit its timeout, from the client or the interpreter
+
+The report is complete before the process exits: with `--report`, the file is
+written and flushed.
+
+## `2` — could not run
+
+Anything that prevents a meaningful run. These are configuration or environment
+problems, and they are worth surfacing differently in CI — a green-turned-red
+suite is news, a suite that never ran is a broken pipeline.
+
+| Condition | Message |
+| --- | --- |
+| No suite files found | `no suite files found (looked for …). Run 'snag init' to create one.` |
+| A named path does not exist | `path does not exist: PATH` |
+| A manifest fails to parse | `parsing suite PATH` |
+| Duplicate ids in one file | `duplicate test id 'ID' in PATH` |
+| Invalid regex in a filter | `invalid regular expression in filter` |
+| Bad glob pattern | `bad glob pattern 'PATTERN'` |
+| Report file cannot be created | `cannot write report to PATH: IO ERROR` |
+| `snag check` found compile errors | `N of M test(s) failed to compile` |
+| `snag init` would overwrite | `PATH already exists (use --force to overwrite)` |
+
+All of these print to **stderr** prefixed with `Error: `, and nothing is
+executed.
+
+## Using them in CI
+
+```bash
+#!/usr/bin/env bash
+set -uo pipefail
+
+snag tests/ --format junit --report report.xml
+code=$?
+
+case "$code" in
+  0) echo "all green" ;;
+  1) echo "::error::API regression detected — see report.xml" ;;
+  2) echo "::error::snag could not run — check suite paths and manifests" ;;
+esac
+
+exit "$code"
+```
+
+Do **not** use `set -e` around the invocation without capturing `$?` first: the
+shell will exit before you can tell 1 from 2.
+
+## Deliberate non-errors
+
+Two cases that look like they should fail but do not:
+
+**An empty selection.** A filter matching nothing exits 0. If a stale `-t` must
+break the build, assert on the count:
+
+```bash
+test "$(snag list tests/ -t smoke -f jsonl | wc -l)" -gt 0 || {
+  echo "no tests matched -t smoke"; exit 1;
+}
+```
+
+**A missing script file.** That fails the individual test (exit 1) rather than
+aborting the run, so one broken path does not hide the results of everything
+else.

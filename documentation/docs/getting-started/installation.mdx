@@ -1,0 +1,111 @@
+---
+id: installation
+title: Installation
+sidebar_position: 1
+description: Build Snag from source with cargo, verify the binary, and enable shell completions.
+---
+
+# Installation
+
+Snag is a single binary built from a Rust crate. There is no runtime dependency
+to install alongside it.
+
+## Requirements
+
+| Requirement | Notes |
+| --- | --- |
+| Rust toolchain | The crate uses **edition 2024**, so a recent stable toolchain is required (Rust 1.85 or newer). |
+| A C linker | Provided by Xcode Command Line Tools on macOS, `build-essential` on Debian/Ubuntu. |
+| TLS | `reqwest` is built with its default TLS backend; no extra system package is needed on macOS or Windows. On Linux, install `pkg-config` and `libssl-dev` if the build complains about OpenSSL. |
+
+Install Rust from [rustup.rs](https://rustup.rs) if you do not have it:
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+```
+
+## Build from source
+
+```bash
+git clone https://github.com/ShortyPing/snag.git
+cd snag
+cargo build --release
+```
+
+The binary lands at `target/release/snag`. Put it on your `PATH`:
+
+```bash
+# macOS / Linux
+install -m 0755 target/release/snag /usr/local/bin/snag
+```
+
+## Install with cargo
+
+From a clone, or straight from the repository:
+
+```bash
+cargo install --path .
+# or
+cargo install --git https://github.com/ShortyPing/snag.git
+```
+
+`cargo install` places the binary in `~/.cargo/bin`, which rustup already adds
+to your `PATH`.
+
+## Verify
+
+```bash
+snag --version
+# snag 0.1.0
+
+snag --help
+```
+
+Run the demo suite that ships with the repository to confirm the whole pipeline
+works. The `fast` tag selects the test that needs no network:
+
+```console
+$ snag demo/suite.toml -t fast -v
+running 1 test across 1 suite
+PASS assertion helpers, no network [12ms]
+    | running against local
+
+test result: ok. 1 passed; 0 failed; 0 timed out; 0 skipped; finished in 13ms
+```
+
+Drop the `-t fast` to run the network tests too — they hit `example.com` and
+`httpbin.org`.
+
+## Shell completions
+
+`snag completions <shell>` writes a completion script to stdout. Supported
+shells are the ones `clap_complete` supports: `bash`, `zsh`, `fish`,
+`elvish`, and `powershell`.
+
+```bash
+# zsh — into a directory that is on your $fpath
+snag completions zsh > "${fpath[1]}/_snag"
+
+# bash
+snag completions bash > /usr/local/etc/bash_completion.d/snag
+
+# fish
+snag completions fish > ~/.config/fish/completions/snag.fish
+```
+
+## Running in CI without installing
+
+If a job only needs to run the suite once, building in the job is usually
+cheaper to maintain than distributing a binary:
+
+```yaml
+- uses: dtolnay/rust-toolchain@stable
+- run: cargo install --git https://github.com/ShortyPing/snag.git
+- run: snag --format junit --report report.xml tests/
+```
+
+See [CI integration](../guides/ci-integration.mdx) for full workflow examples.
+
+## Next
+
+Head to the [quickstart](./quickstart.mdx) for a green run against a real API.

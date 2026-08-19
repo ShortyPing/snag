@@ -1,0 +1,187 @@
+---
+id: selecting-tests
+title: Selecting tests
+sidebar_position: 4
+description: Filter by substring, regex, or tag — the same way for run, list, and check.
+---
+
+# Selecting tests
+
+Selection flags are shared by `run`, `list`, and `check`. They behave
+identically in all three, which makes `snag list` the way to preview exactly
+what a `snag` invocation would execute.
+
+## The flags
+
+| Flag | Short | Meaning |
+| --- | --- | --- |
+| `--filter` | `-k` | Keep tests whose **name or id** contains this substring. Repeatable. |
+| `--exclude` | `-e` | Drop tests whose name or id contains this substring. Repeatable. |
+| `--tag` | `-t` | Keep tests carrying this tag. Repeatable, OR-ed. |
+| `--regex` | | Treat `--filter` and `--exclude` patterns as regular expressions. |
+
+Paths are positional and select which suite *files* are loaded; the flags above
+then select tests within them.
+
+:::caution Selection flags belong to a verb
+`-k`, `-e`, `-t`, and `--regex` are arguments of `run`, `list`, and `check` —
+not global flags. The `run` verb is only inserted automatically in front of a
+**path**, so a flags-only invocation must name it:
+
+```bash
+snag -t smoke        # error: unexpected argument '-t' found
+snag run -t smoke    # correct
+snag . -t smoke      # also correct — the path triggers the implicit `run`
+```
+:::
+
+## How the filters combine
+
+For each discovered test, in order:
+
+1. **Include** — if any `-k` was given, the test must match at least one of
+   them (OR). No `-k` means everything passes this step.
+2. **Exclude** — if the test matches any `-e`, it is dropped. Exclude always
+   beats include.
+3. **Tags** — if any `-t` was given, the test must carry at least one of those
+   tags (OR).
+
+Different flag kinds are AND-ed; repeats of the same flag are OR-ed.
+
+```bash
+snag run -k cart -k checkout      # cart OR checkout
+snag run -k cart -e legacy        # cart AND NOT legacy
+snag run -k cart -t smoke         # cart AND tagged smoke
+snag run -t smoke -t nightly      # smoke OR nightly
+```
+
+Both the **name** and the **id** are matched, so `-k cart` finds a test named
+"POST /carts creates a cart" as well as one with id `cart-create`.
+
+## Substrings by default
+
+Filters are plain, case-sensitive substring matches. No globbing, no implicit
+anchors:
+
+```bash
+snag run -k checkout  # matches "checkout-pay", "POST /checkout", "precheckout"
+snag run -k Checkout  # matches nothing of the above — case matters
+```
+
+## Regular expressions
+
+`--regex` switches both `-k` and `-e` to regex mode, using the
+[`regex`](https://docs.rs/regex) crate's syntax. Patterns are unanchored unless
+you anchor them.
+
+```bash
+snag run --regex -k '^cart-'              # ids starting with cart-
+snag run --regex -k 'GET /(carts|orders)' # alternation
+snag run --regex -k '(?i)checkout'        # case-insensitive
+snag run --regex -e '-(slow|flaky)$'      # drop suffixed tests
+```
+
+An invalid pattern is an error before anything runs:
+
+```console
+$ snag run --regex -k '('
+Error: invalid regular expression in filter
+```
+
+Note that `--regex` applies to filters, **not** to path arguments — those are
+shell-style globs handled during discovery.
+
+## Tags
+
+Tags come from the manifest and are matched exactly — no substring, no regex:
+
+```toml
+[[test]]
+id = "cart-create"
+tags = ["smoke", "checkout"]
+file = "./cart_create.snag"
+```
+
+```bash
+snag run -t smoke              # exactly the tag "smoke"
+snag run -t smoke -t nightly   # either tag
+snag run -t smoke -t checkout  # either tag — NOT the intersection
+```
+
+There is no AND across tags. When you need an intersection, combine a tag with a
+filter (`snag run -t smoke -k checkout`), or introduce a more specific tag.
+
+A tagging scheme that works well in practice:
+
+| Tag | Meaning |
+| --- | --- |
+| `smoke` | Runs on every pull request; fast, no fixtures |
+| `network` | Requires outbound access to a third party |
+| `slow` | Takes seconds; nightly only |
+| `fixtures` | Mutates shared state; often `parallel_safe = false` |
+
+## Preview before you run
+
+```console
+$ snag list --long demo/suite.toml
+demo/suite.toml::example-responds
+    name:   example.com answers 200
+    tags:   network, smoke
+    script: demo/example_test.snag
+demo/suite.toml::json-api
+    name:   JSON body can be walked by path
+    tags:   network
+    script: demo/json_test.snag
+demo/suite.toml::assertions
+    name:   assertion helpers, no network
+    tags:   fast
+    script: demo/assertions_test.snag
+
+3 test(s)
+```
+
+Add the same filters you plan to run with:
+
+```console
+$ snag list demo/suite.toml -t fast
+assertion helpers, no network
+
+1 test(s)
+```
+
+`list` also honours `--format`, so a tool can consume the selection:
+
+```console
+$ snag list demo/suite.toml -t fast -f jsonl
+{"id":"demo/suite.toml::assertions","name":"assertion helpers, no network","parallel_safe":true,"script":"demo/assertions_test.snag","suite":"Snag Demo Regression Suite","suite_path":"demo/suite.toml","tags":["fast"],"test_id":"assertions","timeout_ms":10000}
+```
+
+`--dry-run` is the `run`-side equivalent: every selected test is reported as
+skipped with the message `dry run`, through the normal reporter, so a CI report
+shows the shape of the run without executing it.
+
+## Empty selections
+
+A filter that matches nothing is **not** an error. Discovery succeeded; zero
+tests ran; the run is green:
+
+```console
+$ snag run -t nonexistent
+running 0 tests across 0 suites
+
+test result: ok. 0 passed; 0 failed; 0 timed out; 0 skipped; finished in 0ms
+```
+
+Exit code 0. If a job must fail when a filter goes stale, assert on the count
+yourself:
+
+```bash
+test "$(snag list -t smoke -f jsonl | wc -l)" -gt 0 || exit 1
+```
+
+Finding no *suite files* is different — that is an error and exit code 2.
+
+## Next
+
+- [Execution model](./execution-model.mdx) — what happens to the tests you selected
+- [CLI reference](../reference/cli.mdx)

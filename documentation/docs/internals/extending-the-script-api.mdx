@@ -1,0 +1,237 @@
+---
+id: extending-the-script-api
+title: Extending the script API
+sidebar_position: 3
+description: Add a function, an assertion, or a response accessor to the Rhai engine — with the conventions that keep failures readable.
+---
+
+# Extending the script API
+
+Every function a script can call is registered in
+`src/scripting_registration.rs`. Adding one is a small, local change; this page
+covers the conventions that keep the result consistent with what is already
+there.
+
+## Where registration happens
+
+Four functions, called in the same order from `runner::execute_once()` (for a
+real run) and `runner::compile()` (for `snag check`):
+
+```rust
+let mut engine = Engine::new();
+register_http(&mut engine, client);
+register_debug(&mut engine, sink.clone());
+register_assertions(&mut engine);
+register_env(&mut engine);
+```
+
+If you add a fifth registration function, add it to **both** call sites —
+otherwise `snag check` compiles against a different engine than the one that
+runs, which is exactly the class of bug `check` exists to prevent.
+
+## Adding a plain function
+
+`register_env` is the simplest host: no state, no types.
+
+```rust
+// src/scripting_registration.rs, in register_env()
+engine.register_fn("uuid", || -> String {
+    // …generate…
+});
+```
+
+Fallible functions return `Result<T, Box<EvalAltResult>>`. A `String` converts
+into that error type, so the idiom is `.into()` or `format!(…).into()`:
+
+```rust
+engine.register_fn("env_int", |name: &str| -> Result<i64, Box<EvalAltResult>> {
+    let raw = std::env::var(name)
+        .map_err(|_| format!("environment variable `{name}` is not set"))?;
+    raw.parse::<i64>()
+        .map_err(|_| format!("`{name}` is not an integer: {raw:?}").into())
+});
+```
+
+An `Err` becomes a Rhai runtime error, which the runner turns into a failed test
+carrying that message and the script position.
+
+## Adding an assertion
+
+Assertions live in `register_assertions` and follow one shape: return `Ok(())`
+when the condition holds, otherwise an error whose message starts with
+`assertion failed:` and states **expected** and **actual**.
+
+```rust
+engine.register_fn(
+    "assert_header",
+    |r: &mut Response, name: &str, expected: &str| -> Result<(), Box<EvalAltResult>> {
+        let wanted = name.to_ascii_lowercase();
+        let actual = r
+            .headers
+            .iter()
+            .find(|(k, _)| k.to_ascii_lowercase() == wanted)
+            .map(|(_, v)| v.as_str())
+            .unwrap_or_default();
+
+        if actual == expected {
+            return Ok(());
+        }
+        Err(format!(
+            "assertion failed: expected header {name} to be {expected:?}, got {actual:?}"
+        )
+        .into())
+    },
+);
+```
+
+Conventions worth keeping:
+
+- **State both sides.** "expected 201, got 500" is actionable; "status mismatch"
+  is not.
+- **Use `{:?}` for strings** so whitespace and empties are visible.
+- **Include body context when the response is the subject**, through
+  `truncate(&r.text, 500)` — the same cap every other body-bearing assertion
+  uses.
+- **Take the response as `&mut Response`.** Rhai passes the receiver of a method
+  call mutably; a `Response` parameter by value will not resolve as `res.foo()`.
+
+## Adding a response accessor
+
+Property getters use `register_get`; methods use `register_fn`.
+
+```rust
+// res.content_length  — a property
+engine.register_get("content_length", |r: &mut Response| r.text.len() as i64);
+
+// res.header_names()  — a method
+engine.register_fn("header_names", |r: &mut Response| {
+    r.headers.iter().map(|(k, _)| k.clone().into()).collect::<rhai::Array>()
+});
+```
+
+Rhai integers are `i64` and floats are `f64`. Cast at the boundary — a `usize`
+or `u16` will not register.
+
+If the new field must be captured at request time, add it to the `Response`
+struct and populate it inside the `send` registration, where the `reqwest`
+response is still in scope.
+
+## Adding a request builder method
+
+Builder methods take the builder **by value**, mutate, and return it. That is
+what makes chaining work in Rhai.
+
+```rust
+engine.register_fn("query", |mut b: ReqBuilder, key: &str, value: &str| {
+    let separator = if b.url.contains('?') { '&' } else { '?' };
+    b.url = format!("{}{separator}{key}={value}", b.url);
+    b
+});
+```
+
+```js
+get(base_url).query("page", "2").query("limit", "50").send()
+```
+
+A fallible builder method returns `Result<ReqBuilder, Box<EvalAltResult>>` —
+`json()` is the existing example.
+
+## Overloads instead of generics
+
+Rhai has no generics, so a function that should accept several types is
+registered once per type. `assert_eq` is the precedent:
+
+```rust
+engine.register_fn("assert_eq", |a: i64, b: i64| eq_result(a, b));
+engine.register_fn("assert_eq", |a: bool, b: bool| eq_result(a, b));
+engine.register_fn("assert_eq", |a: f64, b: f64| eq_result(a, b));
+engine.register_fn("assert_eq", |a: &str, b: &str| eq_result(a, b));
+```
+
+There is no implicit conversion between overloads: `assert_eq(1, 1.0)` does not
+resolve, and the failure reads
+`Function not found: assert_eq (i64, f64)`. When a helper is generic in Rust,
+write it once and register thin wrappers, as `eq_result` does.
+
+Alternatively take `Dynamic` and inspect it — that is what `field()` does — at
+the cost of worse error messages when the value is the wrong shape.
+
+## Naming
+
+| Prefix | Meaning |
+| --- | --- |
+| `assert_*` | Fails the test when the condition does not hold |
+| `env*` | Reads the process environment |
+| `print*` | Writes to the captured output sink |
+| everything else | Returns a value; fails only on a genuine error |
+
+Match the existing snake_case, and prefer a name that reads as an English clause
+at the call site: `assert_faster_than(res, 800)`.
+
+## Writing to the captured sink
+
+Only `register_debug` holds the `OutputSink`. To add a function that prints,
+register it there and clone the sink into the closure:
+
+```rust
+pub fn register_debug(engine: &mut Engine, sink: OutputSink) {
+    // …existing hooks…
+
+    let s = sink.clone();
+    engine.register_fn("print_headers", move |r: &mut Response| {
+        for (k, v) in &r.headers {
+            push(&s, format!("  {k}: {v}"));
+        }
+    });
+}
+```
+
+Never use `println!` — output must stay per test, or a parallel run interleaves.
+
+## Testing the addition
+
+`scripting_registration.rs` has a test module that builds an engine with the
+registrations and evaluates a snippet. Add cases next to the existing ones:
+
+```rust
+#[test]
+fn assert_header_reports_both_sides() {
+    let err = engine()
+        .run(r#"…"#)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("expected header"), "{err}");
+}
+```
+
+Two rules for these tests: **no network** — build values in the script rather
+than sending a request — and assert on the *message*, not just that an error
+occurred, since the message is the feature.
+
+Then run the whole suite:
+
+```bash
+cargo test
+cargo clippy --all-targets
+cargo fmt
+```
+
+## Documenting it
+
+A function that is not in the reference does not exist as far as users are
+concerned. Add it to:
+
+- `docs/reference/script-api.mdx` — signature, behaviour, failure message
+- `docs/guides/writing-scripts.mdx` — only if it changes how tests are written
+- `README.md` — if it belongs in the one-paragraph summary of the surface
+
+## Checklist
+
+1. Registered in the right `register_*` function
+2. Fallible paths return `Result<_, Box<EvalAltResult>>` with a message that
+   names expected and actual
+3. `i64` / `f64` at the boundary, `&mut` receivers for methods
+4. Overloads added for every type it should accept
+5. Unit test asserting the message, no network
+6. `cargo test`, `cargo clippy --all-targets`, `cargo fmt`
+7. Reference documentation updated

@@ -1,0 +1,224 @@
+---
+id: adding-a-reporter
+title: Adding a reporter
+sidebar_position: 4
+description: Implement a new output format end to end — the trait, the factory, the CLI enum, and the tests.
+---
+
+# Adding a reporter
+
+A reporter turns the run's event stream into an output format. Adding one is
+four small edits and a test.
+
+## The trait
+
+```rust
+pub trait Reporter {
+    fn run_started(&mut self, _tests: &[Test]) -> anyhow::Result<()> { Ok(()) }
+    fn test_started(&mut self, _test: &Test) -> anyhow::Result<()> { Ok(()) }
+    fn test_finished(&mut self, _outcome: &Outcome) -> anyhow::Result<()> { Ok(()) }
+    fn run_finished(&mut self, _summary: &Summary) -> anyhow::Result<()> { Ok(()) }
+}
+```
+
+Every method defaults to a no-op, so implement only what your format needs.
+
+Guarantees you can rely on:
+
+- **Single-threaded.** All four methods are called from the main thread, from
+  the event loop in `execute_batch`. No locking, no `Sync` bound.
+- **Ordering.** `run_started` first, `run_finished` last. In between,
+  `test_started` and `test_finished` interleave freely across tests when several
+  workers are running — a `test_finished` may arrive before another test's
+  `test_started`.
+- **Every selected test finishes.** Even a fail-fast drain or a dry run emits
+  `test_finished` with `Status::Skipped`, so counts always add up.
+- **Errors stop the run.** Returning `Err` records the error and sets the cancel
+  flag; the first error is what `run` returns, and the process exits 2.
+
+Note that `test_started` is **not** emitted for tests skipped by cancellation or
+a dry run — only tests that actually execute are announced.
+
+## What you receive
+
+```rust
+pub struct Outcome {
+    pub test: Test,             // id, name, tags, script, suite_title, suite_path, …
+    pub status: Status,         // Passed | Failed | TimedOut | Skipped
+    pub message: Option<String>,
+    pub duration: Duration,     // total across every retry attempt
+    pub attempts: u32,          // 0 for skipped tests
+    pub output: Vec<String>,    // captured print/debug lines
+}
+
+pub struct Summary {
+    pub passed: usize,
+    pub failed: usize,
+    pub timed_out: usize,
+    pub skipped: usize,
+    pub duration: Duration,
+}
+```
+
+`test.qualified_id()` gives `<suite_path>::<id>` — the identifier every other
+format keys on. Prefer it over `name`, which is not unique.
+
+## Step 1 — write the reporter
+
+Streaming formats write in `test_finished`; document formats buffer and emit in
+`run_finished`. Here is a compact streaming example — a TAP reporter:
+
+```rust title="src/report.rs"
+pub struct Tap {
+    out: Box<dyn Write + Send>,
+    count: usize,
+}
+
+impl Reporter for Tap {
+    fn run_started(&mut self, tests: &[Test]) -> anyhow::Result<()> {
+        writeln!(self.out, "1..{}", tests.len())?;
+        self.out.flush()?;
+        Ok(())
+    }
+
+    fn test_finished(&mut self, o: &Outcome) -> anyhow::Result<()> {
+        self.count += 1;
+        let ok = if o.status.is_failure() { "not ok" } else { "ok" };
+        writeln!(self.out, "{ok} {} - {}", self.count, o.test.name)?;
+
+        if o.status == Status::Skipped {
+            writeln!(self.out, "  # SKIP {}", o.message.as_deref().unwrap_or(""))?;
+        }
+        if let Some(msg) = &o.message {
+            for line in msg.lines() {
+                writeln!(self.out, "  # {line}")?;
+            }
+        }
+        self.out.flush()?;
+        Ok(())
+    }
+}
+```
+
+Use `Status::is_failure()` rather than matching `Failed` by hand — it covers
+`TimedOut` too, and a future status cannot silently be treated as a pass.
+
+For a buffering format, keep a `Vec<Outcome>` (or a `Vec<serde_json::Value>`, as
+`Json` does) and write everything in `run_finished`. Buffering costs you partial
+output when a run is interrupted; that is the trade `Json` and `Junit` accept in
+exchange for a well-formed document.
+
+## Step 2 — add the format to the CLI
+
+```rust title="src/main.rs"
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum Format {
+    Human,
+    Jsonl,
+    Json,
+    Teamcity,
+    Junit,
+    /// Test Anything Protocol.
+    Tap,
+}
+```
+
+The doc comment becomes the `--help` text for the value, so write it for users.
+
+## Step 3 — wire up the factory
+
+```rust title="src/report.rs"
+pub fn reporter_for(format: Format, ctx: &Ctx, out: Box<dyn Write + Send>) -> Box<dyn Reporter> {
+    match format {
+        Format::Human => Box::new(Human::new(out, ctx.color, ctx.quiet, ctx.verbose > 0)),
+        Format::Jsonl => Box::new(Jsonl { out }),
+        Format::Json => Box::new(Json { out, tests: vec![] }),
+        Format::Teamcity => Box::new(TeamCity { out }),
+        Format::Junit => Box::new(Junit { out, tests: vec![] }),
+        Format::Tap => Box::new(Tap { out, count: 0 }),
+    }
+}
+```
+
+The match is exhaustive, so the compiler will not let you forget this step.
+
+## Step 4 — check `--report` and `list`
+
+Two places branch on `Format` outside the factory:
+
+**`runner::build_reporter()`** decides what a `--report FILE` file receives. Only
+`Human` is special-cased (it becomes `Json`); any other format is passed
+through, so a new format works with `--report` automatically.
+
+**`main::cmd_list()`** matches on the format to render the *test list*. It
+currently treats everything non-`Human` as JSON:
+
+```rust
+match ctx.format {
+    Format::Json | Format::Jsonl | Format::Teamcity | Format::Junit => { /* JSON */ }
+    Format::Human => { /* names */ }
+}
+```
+
+Add your variant to whichever arm makes sense — if you do nothing, the code will
+not compile, which is the intended nudge.
+
+## Step 5 — test it
+
+Reporters are tested by writing into a `Vec<u8>` and asserting on the bytes:
+
+```rust title="src/report.rs, mod tests"
+fn outcome(name: &str, status: Status) -> Outcome {
+    Outcome {
+        test: Test { /* … */ },
+        status,
+        message: None,
+        duration: Duration::from_millis(5),
+        attempts: 1,
+        output: vec![],
+    }
+}
+
+#[test]
+fn tap_numbers_tests_from_one() {
+    let buf: Vec<u8> = Vec::new();
+    let mut tap = Tap { out: Box::new(buf), count: 0 };
+    // …drive the events, then assert on what was written…
+}
+```
+
+Because `out` is a `Box<dyn Write + Send>`, capturing the bytes needs a small
+shared-buffer writer — or assert on the escaping helpers directly, which is what
+the existing `xml_escape` and `tc_escape` tests do. Escaping is where format
+bugs actually live.
+
+## Escaping
+
+Every format that embeds free text — messages, captured output, names — needs an
+escape function, and it must handle what a real response body can contain:
+
+| Format | Helper | Handles |
+| --- | --- | --- |
+| TeamCity | `tc_escape` | `'`, `\|`, `[`, `]`, `\n`, `\r` |
+| JUnit | `xml_escape` | `&`, `<`, `>`, `"`, `'`, and control characters illegal in XML 1.0 |
+| JSON / JSONL | `serde_json` | Everything, for free |
+
+Test the escaper directly with a hostile string — that is cheaper and more
+precise than asserting on a whole document.
+
+## Documenting it
+
+- `docs/reference/report-formats.mdx` — the field-level contract
+- `docs/guides/reporters.mdx` — when to choose it
+- `README.md` — the format list
+
+## Checklist
+
+1. Struct plus `impl Reporter` in `report.rs`
+2. Variant added to `Format` in `main.rs`, with a doc comment
+3. Arm added to `reporter_for()`
+4. `cmd_list()` updated for the new variant
+5. Streaming formats flush per event; buffering formats emit in `run_finished`
+6. Free text escaped, with a test for the escaper
+7. `cargo test`, `cargo clippy --all-targets`, `cargo fmt`
+8. Documentation updated

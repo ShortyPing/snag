@@ -1,0 +1,40 @@
+.features {
+  padding: 3.5rem 0 1rem;
+}
+
+.sectionTitle {
+  font-size: 1.7rem;
+  margin-bottom: 1.75rem;
+  text-align: center;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 1.25rem;
+}
+
+.card {
+  border: 1px solid var(--snag-border);
+  border-radius: 12px;
+  background: var(--snag-surface);
+  padding: 1.4rem 1.4rem 1.1rem;
+  transition: transform 150ms ease, box-shadow 150ms ease;
+}
+
+.card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 10px 26px rgba(0, 0, 0, 0.08);
+}
+
+.cardTitle {
+  font-size: 1.05rem;
+  margin-bottom: 0.55rem;
+}
+
+.cardBody {
+  margin: 0;
+  color: var(--snag-ink-soft);
+  font-size: 0.95rem;
+  line-height: 1.6;
+}

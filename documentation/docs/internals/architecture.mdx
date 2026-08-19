@@ -1,0 +1,284 @@
+---
+id: architecture
+title: Architecture
+sidebar_position: 1
+description: How a run flows from argv to a report — discovery, execution phases, the worker pool, and the reporter event stream.
+---
+
+# Architecture
+
+Snag is one binary, five modules, and a single-threaded reporter fed by a worker
+pool over a channel. This page follows one run from `argv` to exit code.
+
+## Crate layout
+
+```
+src/
+├── main.rs                    CLI definition, dispatch, and the cmd_* handlers
+├── discovery.rs               path/glob → suite files → filtered tests
+├── manifest.rs                TOML schema and the resolved Test type
+├── runner.rs                  phases, worker pool, retries, timeouts
+├── report.rs                  Status, Outcome, Summary, and the five reporters
+└── scripting_registration.rs  everything registered into the Rhai engine
+```
+
+Dependencies point one way — `main` → `discovery` → `manifest`, and `main` →
+`runner` → {`report`, `scripting_registration`} — so no module needs to know
+about the reporter except the runner, and no module needs to know about the CLI
+except `main`.
+
+## The pipeline
+
+```
+argv
+ │  main.rs: implicit_run() inserts the `run` verb, clap parses
+ ▼
+Cli + Ctx ─────────────────────────────────────────────────────┐
+ │                                                             │
+ │  discovery::discover(&SelectionArgs)                        │ format, color,
+ ▼                                                             │ verbose, quiet
+suite_files()      paths / globs / dir walk → Vec<PathBuf>     │
+ │                                                             │
+ │  manifest::load_suite() per file                            │
+ ▼                                                             │
+Vec<Test>          ids resolved, vars merged, paths normalised │
+ │                                                             │
+ │  Filter::accepts()  -k / -e / -t / --regex                  │
+ ▼                                                             │
+Vec<Test> (selected)                                           │
+ │                                                             │
+ │  runner::run()                                              │
+ ▼                                                             ▼
+shuffle? ─→ partition ─→ execute_batch(serial, 1) ─→ execute_batch(parallel, N)
+                                    │                         │
+                                    └────── Event channel ────┘
+                                                │
+                                     reporter (main thread) ◄─┘
+                                                │
+                                             Summary → Exit
+```
+
+## `main.rs` — argv to a command
+
+Two pieces of behaviour live here beyond clap's derive definitions.
+
+**The implicit `run` verb.** `implicit_run()` scans `argv` for the first
+non-flag argument. If it is not one of `run`, `list`, `check`, `init`,
+`completions`, or `help`, the string `"run"` is inserted before it — so
+`snag demo/suite.toml` behaves like `snag run demo/suite.toml`. Flags that take
+a value are skipped via a `TAKES_VALUE` table so their arguments are not
+mistaken for a verb, and everything after `--` is left alone.
+
+The consequence users notice: an invocation of **flags only** has no positional
+argument, so nothing triggers the rewrite and clap rejects `-t`. That is why
+`snag run -t smoke` is required.
+
+**Error classification.** `main()` maps a handler's `Result` onto an exit code:
+`Ok(exit)` passes the code through, a broken pipe is rewritten to success (so
+`snag list | head` is not an error), and every other error prints
+`Error: {err}` and exits 2.
+
+`Ctx` carries the presentation-level settings — format, resolved color boolean,
+verbosity, quiet — so the deeper modules never look at the CLI types again.
+
+## `discovery.rs` — files to tests
+
+`discover()` is the single entry point shared by `run`, `list`, and `check`.
+That sharing is deliberate: the set of tests `snag list` prints is by
+construction the set `snag` runs.
+
+1. `suite_files()` turns the positional paths into a sorted, de-duplicated list
+   of manifests. Empty input walks the current directory; a glob (`*`, `?`, `[`)
+   is expanded; a directory is walked; a file is taken as-is regardless of its
+   name.
+2. `walk_for_suites()` recurses with `walkdir`, skipping dot-directories and
+   `target`, `node_modules`, `dist`, `build`, `.venv`, and not following
+   symlinks. Only `suite.toml`, `snag.toml`, and `*.snag.toml` are collected.
+3. Each file goes through `manifest::load_suite()`.
+4. `Filter` applies include, exclude, and tag rules — include and exclude match
+   against both name and id, in substring or `RegexSet` mode.
+
+An empty result from step 1 is an error; an empty result from step 4 is not.
+
+## `manifest.rs` — schema and resolution
+
+The TOML types (`Manifest`, `TestDefinition`) are `serde` structs with
+`deny_unknown_fields`, so a mistyped key fails the load instead of being
+ignored. Durations go through `humantime_serde`.
+
+`load_suite()` turns each `TestDefinition` into a resolved `Test`:
+
+- `name` falls back to `id`, `parallel_safe` to `true`
+- `timeout` falls back to the file-level timeout
+- suite variables are cloned and then extended with the test's, so test keys win
+- `script` is `manifest_dir.join(file)`, normalised to drop `.` components while
+  leaving `..` alone — resolving `..` textually would be wrong through a symlink
+- duplicate ids inside one file are rejected
+
+Everything downstream sees `Test` and never re-reads the manifest. That is why
+the runner has no notion of "suite" beyond two strings it carries for reports.
+
+## `runner.rs` — phases and workers
+
+`run()` builds the reporter, optionally shuffles, then splits the tests:
+
+```rust
+let (serial, parallel): (Vec<Test>, Vec<Test>) =
+    tests.iter().cloned().partition(|t| !t.parallel_safe);
+
+let cancel = AtomicBool::new(false);
+execute_batch(&serial, args, 1, &cancel, &mut summary, reporter.as_mut())?;
+execute_batch(&parallel, args, jobs(args.jobs), &cancel, &mut summary, reporter.as_mut())?;
+```
+
+Two calls, one shared `cancel` flag — which is what makes `--fail-fast` in the
+serial phase also skip the parallel phase.
+
+### `execute_batch`
+
+The core of the runner, and the piece worth understanding before changing
+anything:
+
+```rust
+let next = AtomicUsize::new(0);
+let (tx, rx) = mpsc::channel::<Event>();
+let workers = workers.min(tests.len()).max(1);
+
+std::thread::scope(|scope| {
+    for _ in 0..workers {
+        scope.spawn(move || loop {
+            let index = next.fetch_add(1, Ordering::SeqCst);
+            let Some(test) = tests.get(index) else { break };
+            // …cancel check, Started, execute, Finished…
+        });
+    }
+    drop(tx);                      // so the receive loop can end
+
+    for event in rx {              // main thread only
+        // …record into summary, hand to the reporter…
+    }
+});
+```
+
+Design points:
+
+- **Scoped threads** let workers borrow `&[Test]` and `&AtomicBool` directly —
+  no `Arc`, no cloning of the test list.
+- **A shared atomic index** is the work queue. Workers pull; no test is handed
+  out twice; a slow test does not stall a partitioned range.
+- **The reporter runs only on the main thread.** Workers send `Event::Started`
+  and `Event::Finished`; the receive loop is the sole place events are recorded.
+  This is why output never interleaves and why `Reporter` needs no `Sync`.
+- **Dropping the original sender** is what terminates the `for event in rx`
+  loop once every worker has exited.
+- **A reporter error** is stored in `pending` and sets `cancel`, so a failing
+  writer (a full disk, a closed pipe) stops the run instead of being swallowed —
+  and the first error is the one returned.
+- **Cancellation drains rather than drops.** A worker that sees `cancel` still
+  emits a `Skipped` outcome per remaining test, so every selected test appears
+  in the report.
+
+Because cancellation is observed by workers while the main thread sets it, a
+multi-worker run may execute a few extra tests after a fail-fast trip. That is
+inherent to the design, and the tests for `execute_batch` assert around it
+rather than pretending it is deterministic.
+
+### One test
+
+`execute()` wraps `execute_once()` in the retry loop, timing the whole thing and
+reporting `attempts`. `execute_once()`:
+
+1. Checks the script exists, then reads it.
+2. Builds a `reqwest::blocking::Client`, applying the timeout if there is one.
+3. Builds a fresh `rhai::Engine` and registers HTTP, debug, assertion, and env
+   functions.
+4. Installs an `on_progress` hook when a timeout applies: every
+   `PROGRESS_INTERVAL` (2,000) operations it compares `Instant::now()` against
+   the deadline and returns `Some(Dynamic::UNIT)` to abort.
+5. Pushes the test's variables into a `Scope` as **constants**.
+6. Runs the script, and passes any error through `classify()`.
+
+`classify()` calls it a timeout when the interpreter reported
+`ErrorTerminated` **or** the elapsed time already exceeded the budget — the
+second check catches the client-side timeout, whose error is an ordinary
+request failure. Everything else keeps Rhai's message, which is where the line
+and column in a failure come from.
+
+The timeout is therefore enforced twice on purpose: the client covers a socket
+that is blocked on read (where `on_progress` never fires), and the progress hook
+covers a script that loops without making requests.
+
+## `report.rs` — one event stream, five renderings
+
+```rust
+pub trait Reporter {
+    fn run_started(&mut self, _tests: &[Test]) -> anyhow::Result<()> { Ok(()) }
+    fn test_started(&mut self, _test: &Test) -> anyhow::Result<()> { Ok(()) }
+    fn test_finished(&mut self, _outcome: &Outcome) -> anyhow::Result<()> { Ok(()) }
+    fn run_finished(&mut self, _summary: &Summary) -> anyhow::Result<()> { Ok(()) }
+}
+```
+
+Every method defaults to a no-op, so a reporter implements only the events it
+cares about — `Jsonl` ignores `test_started`, `Json` and `Junit` ignore
+everything until `run_finished`.
+
+Two implementations are structural rather than a format:
+
+- **`Multi`** broadcasts to several reporters. It is how `--report FILE` writes
+  human output to stdout and a machine report to a file in one run.
+- **`reporter_for(format, ctx, out)`** is the factory; it takes a
+  `Box<dyn Write + Send>`, which is why a reporter does not care whether it is
+  writing to stdout or a file.
+
+Streaming formats (`Human`, `Jsonl`, `TeamCity`) write and flush per event;
+buffering formats (`Json`, `Junit`) accumulate and emit in `run_finished`.
+
+`Summary::record()` is the only place statuses are counted, and
+`Summary::is_green()` — `failed == 0 && timed_out == 0` — is the only place the
+exit code is decided.
+
+## `scripting_registration.rs` — the script surface
+
+Four registration functions, called in the same order by both `execute_once()`
+and `check`'s `compile()`:
+
+| Function | Registers |
+| --- | --- |
+| `register_http` | `Request`/`Response` types, the six verbs, builder methods, `send`, response accessors, `field`, `basic` |
+| `register_debug` | `on_print` / `on_debug` hooks and `print_response`, all writing into the sink |
+| `register_assertions` | Every `assert_*` function |
+| `register_env` | `env`, `env_or`, `sleep_ms`, `fail` |
+
+`OutputSink` is an `Arc<Mutex<Vec<String>>>` created per test, which is how
+captured output stays per test even under a worker pool. `register_debug` is the
+only registration that needs the sink, which keeps `check` — where output is
+discarded — simple.
+
+Errors are plain `Box<EvalAltResult>` built from strings, so an assertion
+failure and a script `throw` arrive at the runner in the same shape.
+
+## Design decisions worth knowing
+
+**Blocking HTTP, threads for concurrency.** `reqwest::blocking` plus a scoped
+thread pool keeps the whole runner synchronous — no executor, no `async` colour
+to propagate through the Rhai registration layer, and a per-test client that
+cannot leak state between tests.
+
+**A fresh engine per test, per attempt.** Building a Rhai engine is cheap
+compared to an HTTP round trip, and it guarantees that a test cannot see another
+test's globals, or its own state from a previous attempt.
+
+**Reports are events, not a data model.** The runner never assembles a run
+document; each reporter decides what to keep. That is why adding a format is
+one struct and one `impl`.
+
+**Discovery is shared, not duplicated.** `list` and `check` exist to answer
+"what would run" and "does it compile" — both would be worthless if they
+answered for a different set of tests than `run` uses.
+
+## Next
+
+- [Module tour](./module-tour.mdx) — function-level detail
+- [Extending the script API](./extending-the-script-api.mdx)
+- [Adding a reporter](./adding-a-reporter.mdx)

@@ -1,0 +1,392 @@
+---
+id: script-api
+title: Script API reference
+sidebar_position: 3
+description: Every function Snag registers into the Rhai engine — requests, responses, assertions, JSON access, and environment helpers.
+---
+
+# Script API reference
+
+Everything Snag adds on top of the [Rhai](https://rhai.rs/book/) standard
+language. Each test gets a fresh engine, so nothing here carries state between
+tests.
+
+## At a glance
+
+| Group | Functions |
+| --- | --- |
+| [Requests](#requests) | `get` `post` `put` `patch` `delete` `head` · `.header` `.bearer` `.body` `.json` · `.send` |
+| [Responses](#responses) | `.status` `.ok` `.text` `.duration_ms` · `.header(name)` `.json()` |
+| [JSON](#json) | `field(value, path)` · `parse_json(text)` |
+| [Assertions](#assertions) | `assert_status` `assert_ok` `assert_body_contains` `assert_faster_than` `assert_eq` `assert_contains` `assert` `fail` |
+| [Auth](#auth-helpers) | `basic(user, password)` |
+| [Environment](#environment) | `env` `env_or` |
+| [Output](#output) | `print` `debug` `print_response` |
+| [Timing](#timing) | `sleep_ms` |
+
+## Requests
+
+### `get(url)` · `post(url)` · `put(url)` · `patch(url)` · `delete(url)` · `head(url)`
+
+Create a request builder for that method. Nothing is sent until `.send()`.
+
+```js
+let req = get(`${base_url}/users?page=2`);
+```
+
+### `.header(name, value)` → `Request`
+
+Adds a header. Repeatable; nothing is replaced or de-duplicated.
+
+```js
+get(url).header("accept", "application/json").header("x-request-id", "snag-1")
+```
+
+### `.bearer(token)` → `Request`
+
+Shorthand for `authorization: Bearer <token>`.
+
+```js
+get(`${base_url}/me`).bearer(env("API_TOKEN"))
+```
+
+### `.body(text)` → `Request`
+
+Sets a raw string body. No content type is set for you.
+
+```js
+post(`${base_url}/graphql`)
+    .header("content-type", "application/json")
+    .body(`{"query":"{ me { id } }"}`)
+```
+
+### `.json(value)` → `Request`
+
+Serialises any Rhai value to JSON and sets
+`content-type: application/json`.
+
+```js
+post(`${base_url}/carts`).json(#{
+    currency: "EUR",
+    items: [#{ sku: "A-1", qty: 2 }],
+})
+```
+
+Fails the test if the value cannot be serialised.
+
+### `.send()` → `Response`
+
+Performs the request. This is the only call that touches the network. Failures —
+DNS, connection refused, TLS, client timeout — fail the test with
+`request failed: <reqwest error>`.
+
+```js
+let res = get(`${base_url}/health`).send();
+```
+
+The client is per test, and per attempt when retrying: no connection pool, no
+cookie jar, and no shared state between tests. Redirects follow `reqwest`'s
+defaults.
+
+## Responses
+
+| Accessor | Type | Notes |
+| --- | --- | --- |
+| `res.status` | integer | HTTP status code |
+| `res.ok` | bool | True for `200..=299` |
+| `res.text` | string | Body as text, read in full at `send()` time |
+| `res.duration_ms` | integer | Wall-clock milliseconds for this request |
+
+### `res.header(name)` → `string`
+
+Case-insensitive lookup. Returns `""` when the header is absent — it never
+throws, so an assertion produces the error rather than the lookup.
+
+```js
+assert_contains(res.header("content-type"), "application/json");
+```
+
+### `res.json()` → value
+
+Parses `res.text` into Rhai values: JSON objects become maps, arrays become
+arrays. Fails the test with `response body is not valid JSON: …` when the body
+is not JSON.
+
+```js
+let body = res.json();
+assert_eq(body.status, "ok");
+```
+
+Assert the status *before* decoding: a 502 with an HTML error page produces a
+much clearer failure that way.
+
+## JSON
+
+### `field(value, path)` → value
+
+Walks a decoded value by a dotted path. Map keys and array indices use the same
+syntax; a numeric segment indexes an array.
+
+```js
+field(body, "json.project")     // map key
+field(body, "items.0.sku")      // second-level array index
+field(body, "")                 // the value itself
+```
+
+Every failure names the segment that failed:
+
+| Situation | Message |
+| --- | --- |
+| Missing map key | `no key 'nope' in path 'a.nope'` |
+| Non-numeric segment on an array | `'x' in path 'items.x' is not an array index` |
+| Index past the end | `index 3 out of range in path 'items.3'` |
+| Descent into a scalar | `cannot descend into 'x': value is not an object or array` |
+
+That is the reason to prefer `field()` over direct indexing for anything more
+than one level deep.
+
+### `parse_json(text)` → value
+
+Rhai's own JSON parser, for a string you built or received outside a response
+body.
+
+```js
+let expected = parse_json(`{"currency":"EUR"}`);
+assert_eq(field(expected, "currency"), "EUR");
+```
+
+## Assertions
+
+Every assertion either does nothing or fails the test with a message beginning
+`assertion failed:`.
+
+### `assert_status(res, expected)`
+
+Exact status match. On failure, includes up to 500 characters of the body.
+
+```js
+assert_status(res, 201);
+```
+
+```
+assertion failed: expected status 201, got 500
+body: {"error":"cart service unavailable"}
+```
+
+### `assert_ok(res)`
+
+Passes for any `200..=299`. Same body-in-message behaviour.
+
+### `assert_body_contains(res, needle)`
+
+Substring match against the raw body text, before any JSON decoding.
+
+```js
+assert_body_contains(res, "Example Domain");
+```
+
+### `assert_faster_than(res, max_ms)`
+
+Fails when `res.duration_ms > max_ms`.
+
+```js
+assert_faster_than(res, 800);
+```
+
+```
+assertion failed: request took 1204ms, budget was 800ms
+```
+
+This measures one request, not the whole test.
+
+### `assert_eq(a, b)`
+
+Registered once per scalar type: **integer**, **float**, **bool**, and
+**string**. There is no map or array overload, and no implicit conversion
+between integer and float — Rhai has no generics, so each overload is explicit.
+
+```js
+assert_eq(field(body, "total"), 3);
+assert_eq(field(body, "ratio"), 0.5);
+assert_eq(field(body, "enabled"), true);
+assert_eq(field(body, "name"), "snag");
+```
+
+```
+assertion failed: expected 2, got 1
+```
+
+The message reads *expected `b`, got `a`* — the second argument is the expected
+value.
+
+### `assert_contains(haystack, needle)`
+
+String containment, for values you already extracted.
+
+```js
+assert_contains(res.header("content-type"), "json");
+```
+
+### `assert(condition, message)`
+
+Arbitrary condition with your own message.
+
+```js
+assert(base_url.starts_with("https://"), "base_url must be https");
+```
+
+### `fail(message)`
+
+Fails unconditionally. Useful in a branch that should be unreachable.
+
+```js
+if field(body, "state") == "error" {
+    fail(`job failed: ${field(body, "reason")}`);
+}
+```
+
+## Auth helpers
+
+### `basic(username, password)` → `string`
+
+Returns a complete HTTP Basic header value: `Basic ` followed by the base64 of
+`username:password`.
+
+```js
+let res = get(`${base_url}/me`)
+    .header("authorization", basic("demo", env("API_PASSWORD")))
+    .send();
+```
+
+```js
+basic("u", "p")   // "Basic dTpw"
+```
+
+It returns the value, not a builder — pass it to `.header(...)`.
+
+## Environment
+
+### `env(name)` → `string`
+
+Reads a process environment variable. **Fails the test** when it is unset:
+
+```
+environment variable `API_TOKEN` is not set
+```
+
+The right choice for credentials — a missing token should fail loudly rather
+than send an unauthenticated request.
+
+### `env_or(name, fallback)` → `string`
+
+Same lookup, returning `fallback` when the variable is unset.
+
+```js
+let stage = env_or("SNAG_STAGE", "local");
+```
+
+## Output
+
+All output functions write to a **per-test buffer**, never to stdout, so
+parallel tests cannot interleave. See
+[reporters](../guides/reporters.mdx#captured-output) for where it surfaces.
+
+### `print(value)`
+
+```js
+print(`served in ${res.duration_ms}ms`);
+```
+
+### `debug(value)`
+
+Rhai's debug output, captured with its source position:
+
+```
+[debug line 3, position 1] "cart-42"
+```
+
+### `print_response(res)`
+
+Dumps status and duration, every response header, and the first 40 lines of the
+body:
+
+```
+200 (142ms)
+  content-type: application/json
+  content-length: 33
+  {"project":"snag","ok":true}
+```
+
+Handy while writing a test; think twice before committing it, since response
+headers and bodies can carry secrets into a published CI artifact.
+
+## Timing
+
+### `sleep_ms(milliseconds)`
+
+Blocks this test's worker. Negative values are treated as zero.
+
+```js
+sleep_ms(500);
+```
+
+With `-j 1` this stalls the entire run; with the default pool it stalls one
+worker. Always pair polling loops with a bounded iteration count.
+
+## Rhai essentials
+
+The parts of the base language tests actually use:
+
+```js
+let x = 41;                      // variable
+const LIMIT = 500;               // constant
+let s = `total: ${x + 1}`;       // template string
+let map = #{ a: 1, b: "two" };   // object map
+let list = [1, 2, 3];            // array
+
+map.a                            // 1
+list[0]                          // 1
+list.len()                       // 3
+
+if x > 40 { print("big"); } else { print("small"); }
+for item in list { print(item); }
+for i in 0..10 { }               // range, exclusive of 10
+while cond { }
+break; continue;
+
+fn double(n) { n * 2 }           // function, last expression is the result
+
+"42".parse_int()                 // 42
+"4.5".parse_float()              // 4.5
+"abc".to_upper()                 // "ABC"
+"a,b".split(",")                 // ["a", "b"]
+"abc".starts_with("a")           // true
+type_of(map)                     // "map"
+```
+
+There is no `null`; the empty value is `()`. Full documentation:
+[rhai.rs/book](https://rhai.rs/book/).
+
+## Scope
+
+Before a script runs, every variable resolved for the test — suite variables
+merged with test variables — is pushed into the scope as a **constant**:
+
+```toml
+[variables]
+base_url = "https://api.example.com"
+```
+
+```js
+let res = get(`${base_url}/health`).send();   // just an identifier
+```
+
+Assigning to one is a runtime error (`Cannot modify constant base_url`). Copy it
+into a `let` first if you need a mutable version.
+
+## What is not available
+
+Rhai is used with its standard package, and Snag adds only the functions above.
+There is no filesystem access, no process spawning, no socket API beyond the
+HTTP builders, no cookie jar, no WebSocket support, and no shared state between
+tests.

@@ -1,0 +1,114 @@
+/**
+ * CSS files with the .module.css suffix will be treated as CSS modules
+ * and scoped locally.
+ */
+
+.hero {
+  text-align: left;
+}
+
+.heroGrid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.05fr);
+  gap: 2.5rem;
+  align-items: center;
+}
+
+.heroTitle {
+  font-size: 3.4rem;
+  letter-spacing: -0.02em;
+  margin-bottom: 0.75rem;
+}
+
+.heroTagline {
+  font-size: 1.12rem;
+  line-height: 1.65;
+  max-width: 34rem;
+  color: rgba(242, 251, 249, 0.86);
+}
+
+.heroButtons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin-top: 1.75rem;
+}
+
+.heroMeta {
+  margin-top: 1.5rem;
+  margin-bottom: 0;
+  font-size: 0.85rem;
+  color: rgba(242, 251, 249, 0.62);
+}
+
+.sample {
+  padding: 3.5rem 0 1rem;
+}
+
+.sampleTitle {
+  font-size: 1.7rem;
+  text-align: center;
+  margin-bottom: 0.6rem;
+}
+
+.sampleLead {
+  text-align: center;
+  color: var(--snag-ink-soft);
+  margin-bottom: 2rem;
+}
+
+.sampleGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 1.25rem;
+  align-items: start;
+}
+
+.next {
+  padding: 2.5rem 0 4rem;
+}
+
+.nextGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 1rem;
+  margin-top: 1.5rem;
+}
+
+.nextCard {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  padding: 1.15rem 1.25rem;
+  border: 1px solid var(--snag-border);
+  border-left: 3px solid var(--snag-accent);
+  border-radius: 10px;
+  background: var(--snag-surface);
+  text-decoration: none;
+  transition: transform 150ms ease;
+}
+
+.nextCard:hover {
+  text-decoration: none;
+  transform: translateY(-2px);
+}
+
+.nextLabel {
+  font-weight: 650;
+  color: var(--ifm-color-primary);
+}
+
+.nextText {
+  font-size: 0.9rem;
+  color: var(--snag-ink-soft);
+}
+
+@media screen and (max-width: 996px) {
+  .heroGrid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .heroTitle {
+    font-size: 2.6rem;
+  }
+}

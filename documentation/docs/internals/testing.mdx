@@ -1,0 +1,192 @@
+---
+id: testing
+title: Testing Snag
+sidebar_position: 5
+description: How the crate is tested — where the tests live, the fixture conventions, and how to test concurrent code without flakiness.
+---
+
+# Testing Snag
+
+Tests live in `#[cfg(test)] mod tests` at the bottom of each module, next to the
+code they cover. There is no `tests/` directory — every test today is a unit
+test, and none of them touch the network.
+
+```bash
+cargo test                       # everything
+cargo test runner::              # one module
+cargo test fail_fast             # one test by name substring
+cargo test -- --nocapture        # see println! output
+```
+
+## What is covered
+
+| Module | Tests |
+| --- | --- |
+| `discovery` | Filter semantics — substring, exclude-beats-include, tag OR-ing, regex anchors, bad regex, suite-name recognition |
+| `manifest` | Variable precedence, defaults, manifest-relative script paths, path normalisation, duplicate ids, timeout precedence |
+| `report` | XML and TeamCity escaping, duration formatting, summary greenness |
+| `runner` | Shuffle determinism, `jobs()`, and the full `execute_batch` surface |
+| `scripting_registration` | Assertion messages, `field()` traversal and its errors, output capture, `env_or` fallback, truncation |
+
+## Fixture conventions
+
+**Files on disk** go into a process-scoped temp directory, so parallel test
+binaries cannot collide:
+
+```rust
+fn write_temp(name: &str, body: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("snag-manifest-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(name);
+    std::fs::write(&path, body).unwrap();
+    path
+}
+```
+
+`runner` uses the same shape with a `snag-runner-` prefix. File **names** must
+be unique per test, because `cargo test` runs tests in one process, in parallel,
+and they share the directory.
+
+**In-memory values** get a builder:
+
+```rust
+fn dummy(id: &str) -> Test {
+    Test {
+        id: id.into(),
+        name: id.into(),
+        tags: vec![],
+        timeout: None,
+        parallel_safe: true,
+        script: PathBuf::from("t.snag"),
+        vars: BTreeMap::new(),
+        suite_title: "s".into(),
+        suite_path: PathBuf::from("suite.toml"),
+    }
+}
+```
+
+Struct-update syntax keeps variations readable:
+`Test { script: path, ..dummy("t0") }`.
+
+**Scripts under test** are Rhai snippets, never network calls:
+
+```rust
+let ok  = script("pass.snag", "let x = 1;");
+let bad = script("throw.snag", r#"throw "boom";"#);
+```
+
+`assert_eq(1, 1)` and `throw "boom"` cover pass and fail without a socket, which
+is what keeps `cargo test` runnable offline.
+
+## Testing `execute_batch`
+
+The batch runner is concurrent, so its tests are the ones most likely to go
+flaky. The pattern that works:
+
+**A recording reporter** captures events on the main thread, and can be made to
+fail on demand:
+
+```rust
+#[derive(Default)]
+struct Recorder {
+    started: Vec<String>,
+    finished: Vec<Outcome>,
+    fail_on: Option<String>,      // makes test_finished return Err once
+}
+```
+
+**A helper** wires up summary, recorder, and cancel flag:
+
+```rust
+fn batch(tests: &[Test], args: &RunArgs, workers: usize, cancel: &AtomicBool)
+    -> (anyhow::Result<()>, Summary, Recorder)
+```
+
+**Determinism comes from `workers = 1`** wherever ordering is asserted. With one
+worker, tests execute in list order, so a fail-fast test can assert exactly
+which tests were skipped.
+
+### What not to assert
+
+Cancellation is set on the **main thread** after an event is processed, while
+workers race ahead pulling the next test. Two consequences:
+
+- After `--fail-fast` with several workers, the number of tests that ran is not
+  fixed.
+- After a **reporter error**, even a single worker can be several tests ahead
+  before the main thread observes the error and sets the flag.
+
+So the reporter-error test asserts what is invariant — the error is returned,
+the flag ends up set, and every test produced exactly one outcome — and not how
+many were skipped:
+
+```rust
+let err = result.unwrap_err();
+assert!(err.to_string().contains("reporter exploded on t0"));
+assert!(cancel.load(Ordering::SeqCst));
+assert_eq!(summary.total(), 4);
+assert_eq!(recorder.finished.len(), 4);
+```
+
+The fail-fast test *can* assert exact skip counts, because with one worker the
+cancel flag is observed before the next test starts.
+
+If you add a concurrency test, run it in a loop before trusting it:
+
+```bash
+for i in $(seq 1 20); do cargo test runner:: || break; done
+```
+
+## Writing a new test
+
+1. Put it in the module it exercises.
+2. Name it as a sentence about behaviour — `exclude_beats_include`,
+   `fail_fast_skips_the_remaining_tests`, `a_missing_script_fails_the_test`.
+3. Assert on the **message**, not just that an error occurred. Messages are the
+   user-facing feature:
+
+   ```rust
+   assert!(err.contains("no key `nope`"), "{err}");
+   ```
+
+   Passing the actual value as the panic message makes a failure diagnosable
+   from CI output alone.
+4. No network. If a change genuinely needs one, gate it behind `#[ignore]` so
+   `cargo test` stays offline by default.
+
+## Manual verification
+
+Unit tests do not cover the CLI surface or the reporters end to end. The demo
+suite is the smoke test:
+
+```bash
+cargo build
+./target/debug/snag demo/suite.toml -t fast -v      # offline test only
+./target/debug/snag demo/suite.toml                 # includes network tests
+./target/debug/snag demo/suite.toml --dry-run
+./target/debug/snag list --long demo/suite.toml
+./target/debug/snag check -v demo/suite.toml
+./target/debug/snag demo/suite.toml -t fast -f json
+./target/debug/snag demo/suite.toml -t fast -f junit
+./target/debug/snag demo/suite.toml -t fast -f teamcity
+```
+
+For failure paths, a scratch suite is quicker than fixtures:
+
+```bash
+mkdir /tmp/snagfail && cd /tmp/snagfail
+printf 'title = "Fail demo"\n\n[[test]]\nid = "broken"\nfile = "./broken.snag"\n' > suite.toml
+printf 'assert_eq(404, 200);\n' > broken.snag
+snag --color never; echo "exit=$?"
+```
+
+## Before pushing
+
+```bash
+cargo fmt
+cargo clippy --all-targets
+cargo test
+```
+
+All three are expected to be clean. `cargo clippy --all-targets` includes test
+code, which is where lints usually appear first.

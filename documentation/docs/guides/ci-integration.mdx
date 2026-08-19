@@ -1,0 +1,275 @@
+---
+id: ci-integration
+title: CI integration
+sidebar_position: 7
+description: Ready-to-adapt workflows for GitHub Actions, GitLab CI, Jenkins, and TeamCity — plus IntelliJ's test tree.
+---
+
+# CI integration
+
+Snag is built to be driven by a pipeline: exit codes distinguish "tests failed"
+from "could not run", reports are machine-readable, and the same run can produce
+a readable log and an artifact at once.
+
+## The shape of a CI invocation
+
+```bash
+snag tests/ \
+  --format junit --report report.xml \
+  --retries 1 \
+  --timeout 30s
+```
+
+- a **path**, so the run does not depend on the working directory
+- `--format` + `--report`, so the log stays human-readable while CI gets XML
+- `--retries` only if flakiness is a known, tracked problem
+- `--timeout` as a backstop, so a hung dependency cannot hold the job open
+
+Add `--color never` if your CI strips ANSI poorly, and `-q` if you only want
+failures in the log.
+
+## Exit codes
+
+| Code | Meaning | What a job should do |
+| --- | --- | --- |
+| `0` | Everything green | Continue |
+| `1` | At least one test failed or timed out | Fail the job; publish the report |
+| `2` | Could not run — no suites found, bad manifest, unwritable report | Fail the job **loudly**; this is a config bug, not a product bug |
+
+Distinguishing them is worth the two lines it costs:
+
+```bash
+snag tests/ --format junit --report report.xml
+code=$?
+if [ "$code" -eq 2 ]; then
+  echo "::error::snag could not run — check the suite paths"
+fi
+exit "$code"
+```
+
+## GitHub Actions
+
+```yaml title=".github/workflows/api-tests.yml"
+name: API regression
+
+on:
+  pull_request:
+  schedule:
+    - cron: '0 3 * * *'
+
+jobs:
+  snag:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install snag
+        run: cargo install --git https://github.com/ShortyPing/snag.git
+
+      - name: Run smoke suite
+        if: github.event_name == 'pull_request'
+        env:
+          API_TOKEN: ${{ secrets.API_TOKEN }}
+        run: snag tests/ -t smoke --format junit --report report.xml --timeout 30s
+
+      - name: Run full suite
+        if: github.event_name == 'schedule'
+        env:
+          API_TOKEN: ${{ secrets.API_TOKEN }}
+        run: snag tests/ --format junit --report report.xml --retries 1 --timeout 60s
+
+      - name: Publish report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: snag-report
+          path: report.xml
+```
+
+`if: always()` on the upload step matters — without it, the report is lost
+exactly when you need it.
+
+To render results inline rather than as an artifact, feed the same XML to a test
+reporter action:
+
+```yaml
+      - name: Surface results
+        if: always()
+        uses: mikepenz/action-junit-report@v4
+        with:
+          report_paths: report.xml
+```
+
+### Fast pull requests, thorough nightlies
+
+The pattern most suites converge on:
+
+| Trigger | Invocation | Why |
+| --- | --- | --- |
+| pull request | `snag tests/ -t smoke --fail-fast` | Fast signal; stop at the first breakage |
+| merge to main | `snag tests/` | Everything, no retries — the truth |
+| nightly | `snag tests/ --retries 1 --seed $RANDOM` | Shuffled order surfaces order-dependence |
+
+## GitLab CI
+
+```yaml title=".gitlab-ci.yml"
+api-tests:
+  image: rust:latest
+  script:
+    - cargo install --git https://github.com/ShortyPing/snag.git
+    - snag tests/ --format junit --report report.xml --timeout 30s
+  artifacts:
+    when: always
+    reports:
+      junit: report.xml
+    paths:
+      - report.xml
+```
+
+GitLab reads `artifacts:reports:junit` natively, so failures show up in the merge
+request widget.
+
+## Jenkins
+
+```groovy title="Jenkinsfile"
+pipeline {
+  agent any
+  stages {
+    stage('API tests') {
+      steps {
+        withCredentials([string(credentialsId: 'api-token', variable: 'API_TOKEN')]) {
+          sh 'snag tests/ --format junit --report report.xml --color never'
+        }
+      }
+    }
+  }
+  post {
+    always {
+      junit 'report.xml'
+    }
+  }
+}
+```
+
+## TeamCity
+
+Use the `teamcity` reporter and TeamCity picks up the run live, without an
+artifact step:
+
+```bash
+snag tests/ --format teamcity
+```
+
+Service messages arrive as each test starts and finishes, so the build log shows
+progress rather than a wall of output at the end.
+
+## IntelliJ IDEA
+
+The same reporter drives IntelliJ's native test tree. Create a **Shell Script**
+run configuration:
+
+- Script text: `snag tests/ --format teamcity`
+- Working directory: the repository root
+
+Each row in the resulting tree is clickable — the `locationHint` in every
+`testStarted` message points at the `.snag` file, so a failure jumps to the
+script.
+
+## Docker
+
+```dockerfile title="Dockerfile"
+FROM rust:1-slim AS build
+WORKDIR /src
+COPY . .
+RUN cargo install --path . --root /out
+
+FROM debian:stable-slim
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=build /out/bin/snag /usr/local/bin/snag
+WORKDIR /tests
+ENTRYPOINT ["snag"]
+```
+
+```bash
+docker run --rm -v "$PWD/tests:/tests" -e API_TOKEN snag-image . -t smoke
+```
+
+`ca-certificates` is not optional — without it every HTTPS request fails on
+certificate verification.
+
+## Waiting for the service under test
+
+Snag has no built-in wait-for-ready. In a compose-style pipeline, poll first:
+
+```bash
+for i in $(seq 1 30); do
+  curl -fsS "$API_BASE_URL/health" && break
+  sleep 2
+done
+
+snag tests/ --format junit --report report.xml
+```
+
+Or express it as a Snag test, marked serial so it runs before everything else:
+
+```toml
+[[test]]
+id = "wait-for-ready"
+name = "service becomes healthy"
+parallel_safe = false
+timeout = "60s"
+file = "./wait_for_ready.snag"
+```
+
+```js title="wait_for_ready.snag"
+let healthy = false;
+for i in 0..30 {
+    let res = get(`${base_url}/health`).send();
+    if res.ok { healthy = true; break; }
+    sleep_ms(2000);
+}
+assert(healthy, "service never became healthy");
+```
+
+Combine that with `--fail-fast` and a broken deployment fails in seconds instead
+of timing out one test at a time.
+
+## Secrets in CI
+
+Pass credentials as environment variables and read them with `env()`, which
+fails the test when the variable is missing:
+
+```js
+let res = get(`${base_url}/me`).bearer(env("API_TOKEN")).send();
+```
+
+Remember that a failing assertion embeds up to 500 characters of the **response
+body** in the report, and that reports are usually published as artifacts. See
+[variables and secrets](./variables-and-secrets.mdx#what-can-leak-into-a-report).
+
+## Keeping CI honest
+
+- **`snag check` in a lint job.** It parses every manifest and compiles every
+  script without opening a socket — a broken suite is then caught in seconds,
+  even on a pull request that cannot reach the API.
+- **Guard against a filter that stopped matching.** A `-t` typo silently runs
+  zero tests and exits 0:
+
+  ```bash
+  test "$(snag list tests/ -t smoke -f jsonl | wc -l)" -gt 0 || {
+    echo "no tests matched -t smoke"; exit 1;
+  }
+  ```
+- **Pin the invocation path.** Qualified ids embed the suite path as discovered,
+  so always running `snag tests/` (never bare `snag`) keeps ids stable across
+  jobs.
+
+## Next
+
+- [Reporters](./reporters.mdx)
+- [Exit codes](../reference/exit-codes.mdx)
+- [Troubleshooting](./troubleshooting.mdx)

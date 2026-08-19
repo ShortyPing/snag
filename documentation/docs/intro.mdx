@@ -1,0 +1,122 @@
+---
+id: intro
+title: What Snag is
+sidebar_position: 1
+description: Snag is a regression test runner for HTTP APIs — TOML suites, Rhai assertion scripts, and reports for terminals, CI, and IDEs.
+slug: /intro
+---
+
+# What Snag is
+
+Snag is a regression test runner for HTTP APIs. A suite is declared in TOML,
+the assertions live in [Rhai](https://rhai.rs) scripts, and the results come out
+in whatever format the consumer speaks — a terminal, a CI report, or an IDE test
+tree.
+
+It is a single Rust binary. There is no runtime to install next to it, no
+project scaffolding, and no configuration file beyond the suite itself.
+
+```bash
+snag                     # run every suite found under the current directory
+snag demo/suite.toml     # run one suite (the `run` verb is implicit)
+snag list --long         # discover tests without executing them
+snag check               # parse manifests and compile scripts only
+snag init                # scaffold a suite.toml plus an example script
+```
+
+## The mental model
+
+Three concepts, and they map one-to-one onto files on disk.
+
+| Concept | On disk | Job |
+| --- | --- | --- |
+| **Suite** | `suite.toml`, `snag.toml`, or `*.snag.toml` | Declares variables, defaults, and the list of tests |
+| **Test** | one `[[test]]` table | Names a script, plus its tags, timeout, and variables |
+| **Script** | a `.snag` file (Rhai) | Performs requests and asserts what must be true |
+
+A test is identified by its **qualified id** — the suite path and the test id
+joined by `::`, for example `demo/suite.toml::json-api`. That is the string
+reports use, and the one to reach for when a failure needs to be traced back to
+a file.
+
+## A complete example
+
+```toml title="suite.toml"
+title = "Snag Demo Regression Suite"
+timeout = "10s"
+
+[variables]
+base_url = "https://example.com"
+
+[[test]]
+id = "example-responds"
+name = "example.com answers 200"
+tags = ["network", "smoke"]
+file = "./example_test.snag"
+```
+
+```js title="example_test.snag"
+let res = get(base_url)
+    .header("accept", "text/html")
+    .send();
+
+assert_status(res, 200);
+assert_body_contains(res, "Example Domain");
+assert_faster_than(res, 5000);
+
+print(`served in ${res.duration_ms}ms`);
+```
+
+```console
+$ snag
+running 1 test across 1 suite
+PASS example.com answers 200 [212ms]
+
+test result: ok. 1 passed; 0 failed; 0 timed out; 0 skipped; finished in 213ms
+```
+
+Suite variables land in the script's scope as **constants**, so `base_url` is
+just an identifier — not a lookup, not a template placeholder.
+
+## What makes it different
+
+**Assertions are a real language.** Rhai is a scripting language, so a test can
+chain requests, branch on a status, loop over a list, and compute a value before
+asserting on it. Matcher-based tools force that logic back into config; Snag
+does not.
+
+**Failure output is the point.** An assertion failure carries the expected and
+actual value, the script line and column, and up to 500 characters of the
+response body. Anything the script printed is captured per test and replayed
+under the failure — never interleaved with another test's output.
+
+**Timeouts bound both halves.** A per-test timeout is installed on the HTTP
+client *and* on the interpreter's progress hook, so a hung socket and a runaway
+`while true` loop both end the test rather than the run.
+
+**One discovery path.** `run`, `list`, and `check` share a single discovery and
+filtering implementation, so the set of tests you list is exactly the set that
+runs.
+
+## Reading order
+
+### If you are here to write tests
+
+1. [Install Snag](./getting-started/installation.mdx)
+2. [Quickstart](./getting-started/quickstart.mdx) — a green run in about a minute
+3. [Your first suite](./getting-started/your-first-suite.mdx), built from scratch
+4. [Writing scripts](./guides/writing-scripts.mdx) and the [script API reference](./reference/script-api.mdx)
+
+### If you are here to work on Snag
+
+1. [Architecture](./internals/architecture.mdx) — how a run is executed
+2. [Module tour](./internals/module-tour.mdx) — what lives where
+3. [Extending the script API](./internals/extending-the-script-api.mdx)
+4. [Testing](./internals/testing.mdx) and [contributing](./internals/contributing.mdx)
+
+## Status and scope
+
+Snag is at version `0.1.0`. What is documented here is what the binary does
+today. Deliberately out of scope so far: response schema validation, recorded
+fixtures and replay, cookie jars and redirect policy control, and any form of
+distributed execution.

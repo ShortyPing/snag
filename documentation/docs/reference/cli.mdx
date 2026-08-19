@@ -1,0 +1,244 @@
+---
+id: cli
+title: CLI reference
+sidebar_position: 1
+description: Every command, flag, and argument, with defaults and exact behaviour.
+---
+
+# CLI reference
+
+```
+snag [OPTIONS] [COMMAND]
+```
+
+| Command | Purpose |
+| --- | --- |
+| [`run`](#snag-run) | Execute test suites. **Default.** |
+| [`list`](#snag-list) | Discover and print tests without executing them |
+| [`check`](#snag-check) | Parse manifests and compile scripts, no network |
+| [`init`](#snag-init) | Scaffold a suite plus an example script |
+| [`completions`](#snag-completions) | Generate a shell completion script |
+
+## The implicit `run` verb
+
+`snag demo/suite.toml` is rewritten to `snag run demo/suite.toml`. The rule: if
+the first non-flag argument is not one of `run`, `list`, `check`, `init`,
+`completions`, or `help`, then `run` is inserted in front of it. Arguments after
+a `--` separator are left alone.
+
+```bash
+snag                          # no arguments at all → run
+snag demo/suite.toml          # a path → run demo/suite.toml
+snag list                     # a known verb → left as-is
+```
+
+:::caution Flags alone do not trigger it
+An invocation made only of `run` flags has no positional argument, so nothing
+triggers the rewrite and clap rejects the flag:
+
+```console
+$ snag -t smoke
+error: unexpected argument '-t' found
+```
+
+Write `snag run -t smoke`, or add a path: `snag . -t smoke`. Global options
+(`-f/--format`, `--color`, `-v`, `-q`) are accepted in either position.
+:::
+
+## Global options
+
+Available on every command.
+
+| Option | Values | Default | Meaning |
+| --- | --- | --- | --- |
+| `-f`, `--format <FORMAT>` | `human`, `jsonl`, `json`, `teamcity`, `junit` | `human` | Reporter to use |
+| `--color <COLOR>` | `auto`, `always`, `never` | `auto` | ANSI color. `auto` = on when stdout is a TTY |
+| `-v`, `--verbose` | repeatable | off | More output. `-v` also prints captured output for passing tests |
+| `-q`, `--quiet` | | off | Suppress non-essential human output. Conflicts with `-v` |
+| `-h`, `--help` | | | Help. `--help` is long-form, `-h` is a summary |
+| `-V`, `--version` | | | Print the version |
+
+## Selection options
+
+Accepted by `run`, `list`, and `check`, with identical behaviour.
+
+| Option | Repeatable | Meaning |
+| --- | --- | --- |
+| `[PATH]...` | yes | Suite files, directories, or globs. Empty = walk the current directory |
+| `-k`, `--filter <FILTER>` | yes | Keep tests whose name **or** id contains this substring. Multiple values are OR-ed |
+| `-e`, `--exclude <SUBSTR>` | yes | Drop tests whose name or id contains this substring. Beats `--filter` |
+| `-t`, `--tag <TAG>` | yes | Keep tests carrying this exact tag. Multiple values are OR-ed |
+| `--regex` | no | Treat `--filter` and `--exclude` as regular expressions |
+
+Different option kinds are AND-ed; repeats of one option are OR-ed. See
+[selecting tests](../guides/selecting-tests.mdx).
+
+## `snag run`
+
+```
+snag run [OPTIONS] [PATH]...
+```
+
+Runs the selected tests and reports the results.
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `-j`, `--jobs <N>` | `0` | Worker count for the parallel phase. `0` = logical CPU count. Clamped to the number of tests |
+| `--fail-fast` | off | After the first failure or timeout, report all not-yet-started tests as skipped |
+| `--timeout <DURATION>` | none | Per-test timeout, overriding both manifest levels. humantime syntax: `500ms`, `30s`, `2m` |
+| `--retries <N>` | `0` | Re-run a failing test up to N extra times. `attempts` is reported |
+| `--seed <SEED>` | none | Shuffle test order deterministically with this seed |
+| `--dry-run` | off | Execute nothing; report every selected test as skipped with the message `dry run` |
+| `--report <FILE>` | none | Write the machine report to a file, keeping human output on the terminal |
+
+Plus every global and selection option.
+
+```bash
+snag                                        # everything under .
+snag tests/ -t smoke                        # one tier
+snag run -j 4 --fail-fast                   # four workers, stop early
+snag tests/ --retries 2 --timeout 30s       # tolerate flakiness, bound each test
+snag tests/ -f junit --report report.xml    # human on stdout, XML in a file
+```
+
+### `--report` and `--format` together
+
+`--report FILE` splits the audiences: the terminal always gets the human
+reporter, and the file gets the machine one. Because a human report is useless
+in a file, `--format human` is translated to `json` for the file only.
+
+| Invocation | stdout | File |
+| --- | --- | --- |
+| `--report f` | human | JSON |
+| `-f json --report f` | human | JSON |
+| `-f jsonl --report f` | human | JSONL |
+| `-f junit --report f` | human | JUnit XML |
+| `-f teamcity --report f` | human | TeamCity messages |
+| `-f junit` | JUnit XML | — |
+
+The file is created before the run starts; a failure to create it aborts with
+exit code 2.
+
+## `snag list`
+
+```
+snag list [OPTIONS] [PATH]...
+```
+
+Runs discovery and filtering, prints the result, executes nothing.
+
+| Option | Meaning |
+| --- | --- |
+| `--long` | Also print each test's name, tags, and resolved script path |
+
+```console
+$ snag list --long demo/suite.toml
+demo/suite.toml::example-responds
+    name:   example.com answers 200
+    tags:   network, smoke
+    script: demo/example_test.snag
+
+3 test(s)
+```
+
+Without `--long`, one test **name** per line, followed by a count (suppressed by
+`-q`).
+
+With `-f json`, `-f junit`, or `-f teamcity`, a JSON array is printed; with
+`-f jsonl`, one JSON object per line:
+
+```console
+$ snag list demo/suite.toml -t fast -f jsonl
+{"id":"demo/suite.toml::assertions","name":"assertion helpers, no network","parallel_safe":true,"script":"demo/assertions_test.snag","suite":"Snag Demo Regression Suite","suite_path":"demo/suite.toml","tags":["fast"],"test_id":"assertions","timeout_ms":10000}
+```
+
+Fields: `id` (qualified), `test_id`, `name`, `suite`, `suite_path`, `script`,
+`tags`, `timeout_ms` (resolved, `null` when unset), `parallel_safe`.
+
+## `snag check`
+
+```
+snag check [OPTIONS] [PATH]...
+```
+
+Loads every manifest and compiles every script with the same engine and the same
+registered functions the runner uses. No requests are sent.
+
+```console
+$ snag check -v
+ok: demo/suite.toml::example-responds
+ok: demo/suite.toml::json-api
+ok: demo/suite.toml::assertions
+checked 3 test(s): no errors
+```
+
+Failures print per test, and the command exits **2**:
+
+```console
+$ snag check
+error: ./suite.toml::a: Unexpected ';' (line 1, position 9) (a.snag)
+Error: 1 of 1 test(s) failed to compile
+```
+
+What it catches: missing script files, syntax errors, and manifest problems.
+What it does **not** catch: unknown function names and constant reassignment —
+Rhai resolves those at call time.
+
+`-v` lists the passing tests too; `-q` suppresses the summary line.
+
+## `snag init`
+
+```
+snag init [OPTIONS] [PATH]
+```
+
+Scaffolds a suite and an example script.
+
+| Argument / option | Default | Meaning |
+| --- | --- | --- |
+| `[PATH]` | `suite.toml` | Where to write the manifest |
+| `--force` | off | Overwrite an existing manifest (and script) |
+
+```console
+$ snag init
+created suite.toml and ./get_status.snag
+run it with: snag suite.toml
+```
+
+The script is written next to the manifest as `get_status.snag`, and parent
+directories are created as needed — `snag init tests/api.snag.toml` writes
+`tests/api.snag.toml` and `tests/get_status.snag`. An existing manifest is never
+overwritten without `--force`; an existing script is left alone the same way.
+
+## `snag completions`
+
+```
+snag completions <SHELL>
+```
+
+Writes a completion script to stdout. Shells: `bash`, `zsh`, `fish`, `elvish`,
+`powershell`.
+
+```bash
+snag completions zsh > "${fpath[1]}/_snag"
+snag completions bash > /usr/local/etc/bash_completion.d/snag
+snag completions fish > ~/.config/fish/completions/snag.fish
+```
+
+## Exit codes
+
+| Code | Meaning |
+| --- | --- |
+| `0` | All selected tests passed (or none were selected) |
+| `1` | At least one test failed or timed out |
+| `2` | The run could not be completed: no suites found, unparseable manifest, bad regex, unwritable report |
+
+A closed stdout pipe (`snag list \| head`) is not an error — it exits `0`.
+
+See [exit codes](./exit-codes.mdx) for the full contract.
+
+## Environment
+
+Snag reads no configuration from the environment. Scripts read it explicitly
+with `env("NAME")` and `env_or("NAME", "default")`; anything you export before
+invoking `snag` is visible to them.

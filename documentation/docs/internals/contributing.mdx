@@ -1,0 +1,174 @@
+---
+id: contributing
+title: Contributing
+sidebar_position: 6
+description: Development setup, code conventions, the documentation site, and what a good change looks like.
+---
+
+# Contributing
+
+## Setup
+
+```bash
+git clone https://github.com/ShortyPing/snag.git
+cd snag
+cargo build
+cargo test
+```
+
+The crate uses **edition 2024**, so a recent stable toolchain is required. No
+other tooling is needed for the binary; the documentation site needs Node 20+
+and pnpm.
+
+```bash
+./target/debug/snag demo/suite.toml -t fast -v
+```
+
+That runs the offline demo test and confirms the build works end to end.
+
+## Repository layout
+
+```
+snag/
+├── src/                  the crate — see the module tour
+├── demo/                 a runnable example suite, used as a smoke test
+├── documentation/        this Docusaurus site
+├── README.md             the short-form version of the docs
+└── Cargo.toml
+```
+
+## Code conventions
+
+The existing code has a consistent voice; match it rather than importing another
+project's habits.
+
+**Comments explain why, not what.** The ones in the codebase are load-bearing:
+
+```rust
+// The client needs the deadline too: on_progress can't interrupt a socket
+// that's already blocked on a read.
+```
+
+That comment prevents someone from "simplifying" a duplicated timeout. A comment
+restating the next line adds nothing — leave it out.
+
+**Errors carry context.** Use `anyhow::Context` on I/O, and make messages say
+what was being attempted:
+
+```rust
+std::fs::read_to_string(path).with_context(|| format!("reading suite {}", path.display()))?;
+```
+
+**Assertion and script errors state both sides.** `expected 200, got 404`, never
+"mismatch". This is the product, not a detail.
+
+**Small, named helpers.** `is_glob`, `normalize`, `truncate`, `eq_result`,
+`plural` — each does one thing and is unit-tested.
+
+**No `println!` outside the reporters.** Script output goes to the per-test sink;
+user-facing output goes through a `Reporter` or the command handler.
+
+**Rustfmt defaults.** Run `cargo fmt`; do not hand-format.
+
+## Before opening a pull request
+
+```bash
+cargo fmt
+cargo clippy --all-targets
+cargo test
+```
+
+Then, if the change touches behaviour, exercise it against the demo suite and
+paste the output into the pull request. A before/after transcript is the most
+useful thing a reviewer can be given.
+
+## Commit messages
+
+History is short and imperative, lowercase:
+
+```
+add basic(username, password) function
+apply cargo fmt
+POC add basic functionality, and formatting
+```
+
+One logical change per commit. Formatting-only changes go in their own commit,
+so a real diff is never buried in whitespace.
+
+## What a good change includes
+
+| Change | Also needs |
+| --- | --- |
+| New script function | A unit test asserting its failure message, and `docs/reference/script-api.mdx` |
+| New CLI flag | `docs/reference/cli.mdx`, plus the guide that describes the workflow |
+| New manifest field | `docs/reference/manifest.mdx`, and a `manifest.rs` test for the default |
+| New output format | `docs/reference/report-formats.mdx`, `docs/guides/reporters.mdx`, an escaping test |
+| Runner behaviour | An `execute_batch` test, and `docs/guides/execution-model.mdx` |
+
+Documentation is part of the change, not a follow-up. A function that is not in
+the reference does not exist as far as users are concerned.
+
+## Working on the documentation site
+
+```bash
+cd documentation
+pnpm install
+pnpm start          # dev server with hot reload on http://localhost:3000
+pnpm build          # production build — also the link checker
+pnpm typecheck      # TypeScript for the React components
+```
+
+`pnpm build` fails on broken internal links (`onBrokenLinks: 'throw'`), so run it
+before pushing documentation changes.
+
+### Where pages live
+
+```
+documentation/docs/
+├── intro.mdx
+├── getting-started/     installation, quickstart, your-first-suite
+├── guides/              task-oriented, in reading order
+├── reference/           exhaustive, alphabetically browsable
+└── internals/           for people changing Snag itself
+```
+
+The sidebar is defined explicitly in `documentation/sidebars.ts` — add new pages
+there, or they will not appear.
+
+### Conventions for pages
+
+- **Front matter on every page**: `id`, `title`, `sidebar_position`,
+  `description`. The description is the search and social preview.
+- **Cross-link with relative paths** including the extension —
+  `[CLI](../reference/cli.mdx)` — so the build can verify them.
+- **Fence languages**: `toml` for manifests, `js` for `.snag` scripts (Rhai is
+  close enough for the highlighter), `console` for terminal transcripts with a
+  `$` prompt, `bash` for commands to copy, `rust` for crate code.
+- **Verify transcripts.** Every command output in these pages was produced by
+  running the binary. If you change output, re-run and paste the real thing —
+  invented output ages badly and teaches the wrong error messages.
+
+## Reporting issues
+
+Include:
+
+- what you ran, including the full command line
+- `snag --version`
+- the manifest and script, reduced to the smallest reproduction
+- `snag list --long` output, which shows what discovery resolved
+- the actual output with `--color never`
+
+[github.com/ShortyPing/snag/issues](https://github.com/ShortyPing/snag/issues)
+
+## Ideas that fit
+
+Deliberately out of scope today, and all reasonable directions:
+
+- response schema validation (JSON Schema, or a Rhai-native shape matcher)
+- recorded fixtures and replay, for tests that should not hit the network
+- cookie jar and redirect policy control
+- a `--watch` mode for local development
+- richer manifest-level setup and teardown hooks
+
+If you plan a large change, open an issue first — mostly to agree on where it
+belongs in the module layout.

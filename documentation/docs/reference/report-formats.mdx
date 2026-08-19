@@ -1,0 +1,246 @@
+---
+id: report-formats
+title: Report formats reference
+sidebar_position: 4
+description: Field-level definitions for the human, JSONL, JSON, TeamCity, and JUnit reporters.
+---
+
+# Report formats reference
+
+Every reporter renders the same three events — run started, test finished, run
+finished — plus test started where the format has a use for it.
+
+| Format | Streams | Emitted |
+| --- | --- | --- |
+| `human` | yes | Per test, plus a digest at the end |
+| `jsonl` | yes | One object per test, then a summary object |
+| `json` | no | One document in `run_finished` |
+| `teamcity` | yes | Service messages per event |
+| `junit` | no | One XML document in `run_finished` |
+
+Buffering matters when a run is interrupted: `json` and `junit` produce nothing
+if the process is killed mid-run, while `jsonl` and `teamcity` have already
+flushed what completed.
+
+## Statuses
+
+| Value | Meaning | Green? |
+| --- | --- | --- |
+| `passed` | Script finished without throwing | yes |
+| `failed` | Assertion failed, script threw, or the script file was missing | no |
+| `timed_out` | Client or interpreter deadline reached | no |
+| `skipped` | Dry run, or drained after a fail-fast trip | yes |
+
+## Human
+
+```console
+running 3 tests across 1 suite
+PASS example.com answers 200 [212ms]
+FAIL cart step 1 [28ms]
+TIME report generation finishes [10.01s]
+SKIP cart step 2 [0ms]
+
+failures:
+
+  cart step 1 (./suite.toml::t1)
+    Runtime error: cart service unavailable (line 1, position 1)
+    | attempting cart creation
+
+test result: FAILED. 0 passed; 1 failed; 1 timed out; 1 skipped; finished in 10.02s
+```
+
+| Element | Rule |
+| --- | --- |
+| Header | `running N test(s) across M suite(s)`; suites are counted by distinct suite path. Suppressed by `-q` |
+| Mark | `PASS` (green), `FAIL` (red), `TIME` (red), `SKIP` (yellow) |
+| Duration | `<ms>ms` under one second, otherwise `<s.ss>s` |
+| Retries | ` (after N attempts)` when `attempts > 1` |
+| Captured output | Passing tests only with `-v`, prefixed `    \| ` |
+| Digest | One block per failure: name, qualified id, message lines, captured output |
+| Summary | Always printed; `ok` when green, `FAILED` otherwise |
+
+With `-q`, only failing tests print a line — the header and passing lines are
+suppressed, the digest and summary are not.
+
+Color follows `--color`: `auto` (TTY detection), `always`, or `never`.
+
+## JSONL
+
+One JSON object per line, flushed as each test finishes, then a summary object.
+Keys are alphabetical.
+
+### Test object
+
+```json
+{"attempts":1,"duration_ms":7,"id":"demo/suite.toml::assertions","message":null,"name":"assertion helpers, no network","output":["running against local"],"script":"demo/assertions_test.snag","status":"passed","suite":"Snag Demo Regression Suite","suite_path":"demo/suite.toml","tags":["fast"],"test_id":"assertions"}
+```
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `id` | string | Qualified id, `<suite_path>::<test_id>` |
+| `test_id` | string | The manifest `id` |
+| `name` | string | Display name |
+| `suite` | string | Suite title |
+| `suite_path` | string | Manifest path as discovered |
+| `script` | string | Resolved script path |
+| `tags` | array of strings | Manifest tags |
+| `status` | string | `passed`, `failed`, `timed_out`, `skipped` |
+| `duration_ms` | integer | Total duration, **including** every retry attempt |
+| `attempts` | integer | Attempts made. `0` for skipped tests |
+| `message` | string or null | Failure message, timeout message, or skip reason |
+| `output` | array of strings | Captured `print` / `debug` / `print_response` lines |
+
+### Summary object
+
+```json
+{"duration_ms":8,"failed":0,"passed":1,"skipped":0,"timed_out":0,"total":1,"type":"summary"}
+```
+
+Distinguished by `"type": "summary"` — the field exists only here, so
+`select(.type != "summary")` separates the two shapes.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `type` | string | Always `summary` |
+| `total` | integer | Sum of the four counters |
+| `passed` / `failed` / `timed_out` / `skipped` | integer | Per-status counts |
+| `duration_ms` | integer | Wall-clock duration of the whole run |
+
+## JSON
+
+One document, written after the run finishes.
+
+```json
+{
+  "schema": "snag.run/v1",
+  "summary": {
+    "duration_ms": 7,
+    "failed": 0,
+    "passed": 1,
+    "skipped": 0,
+    "timed_out": 0,
+    "total": 1,
+    "type": "summary"
+  },
+  "tests": [
+    {
+      "attempts": 1,
+      "duration_ms": 7,
+      "id": "demo/suite.toml::assertions",
+      "message": null,
+      "name": "assertion helpers, no network",
+      "output": ["running against local"],
+      "script": "demo/assertions_test.snag",
+      "status": "passed",
+      "suite": "Snag Demo Regression Suite",
+      "suite_path": "demo/suite.toml",
+      "tags": ["fast"],
+      "test_id": "assertions"
+    }
+  ]
+}
+```
+
+| Field | Description |
+| --- | --- |
+| `schema` | Format version, currently `snag.run/v1`. Branch on this rather than sniffing the shape |
+| `summary` | The same object the JSONL summary line carries |
+| `tests` | Array of test objects, in completion order |
+
+Output is pretty-printed. Keys are alphabetical within each object — stable, but
+generated rather than authored, so parse by key.
+
+## TeamCity
+
+[Service messages](https://www.jetbrains.com/help/teamcity/service-messages.html),
+flushed per event. Understood by TeamCity and by IntelliJ IDEA, which renders a
+native test tree.
+
+```
+##teamcity[testSuiteStarted name='Snag Demo Regression Suite']
+##teamcity[testStarted name='assertion helpers, no network' locationHint='file://demo/assertions_test.snag']
+##teamcity[testStdOut name='assertion helpers, no network' out='running against local']
+##teamcity[testFinished name='assertion helpers, no network' duration='5']
+##teamcity[testSuiteFinished name='snag']
+```
+
+| Event | Message |
+| --- | --- |
+| Run started | `testSuiteStarted` with the first test's suite title, or `snag` when empty |
+| Test started | `testStarted` with `locationHint='file://<script>'` |
+| Captured output | One `testStdOut` per line, before the status message |
+| Failure / timeout | `testFailed` with the message |
+| Skip | `testIgnored` with the message |
+| Test finished | `testFinished` with `duration` in milliseconds |
+| Run finished | `testSuiteFinished name='snag'` |
+
+Values are escaped per the TeamCity spec: `'` → `\|'`, newline → `\|n`,
+carriage return → `\|r`, `\|` → `\|\|`, `[` → `\|[`, `]` → `\|]`.
+
+Note that the closing `testSuiteFinished` always uses the literal name `snag`,
+while the opening message uses the suite title.
+
+## JUnit
+
+One XML document, written after the run finishes.
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites name="snag" tests="1" failures="0" skipped="0" time="0.005">
+  <testsuite name="snag" tests="1" failures="0" skipped="0" time="0.005">
+    <testcase classname="Snag Demo Regression Suite" name="assertion helpers, no network" time="0.005">
+      <system-out>running against local</system-out>
+    </testcase>
+  </testsuite>
+</testsuites>
+```
+
+| Element / attribute | Value |
+| --- | --- |
+| `testsuites` / `testsuite` `name` | Always `snag`; all tests go into one testsuite regardless of how many manifests ran |
+| `tests` | `summary.total()` |
+| `failures` | `failed + timed_out` — JUnit has no separate timeout concept |
+| `skipped` | `summary.skipped` |
+| `time` | Seconds, three decimals |
+| `testcase` `classname` | The **suite title** |
+| `testcase` `name` | The test name |
+| `testcase` `time` | Test duration in seconds |
+| `<failure message="…" type="…">` | For `failed` and `timed_out`; `type` carries which |
+| `<skipped message="…"/>` | For skipped tests |
+| `<system-out>` | Captured output, newline-joined, present only when non-empty |
+
+Escaping: `&`, `<`, `>`, `"`, and `'` become entities, and control characters
+that are illegal in XML 1.0 (other than tab, newline, carriage return) are
+replaced with a space — a binary-ish response body cannot produce an
+unparseable report.
+
+## `list` output
+
+`snag list` emits its own shape — a description of tests, not results.
+
+```console
+$ snag list demo/suite.toml -t fast -f jsonl
+{"id":"demo/suite.toml::assertions","name":"assertion helpers, no network","parallel_safe":true,"script":"demo/assertions_test.snag","suite":"Snag Demo Regression Suite","suite_path":"demo/suite.toml","tags":["fast"],"test_id":"assertions","timeout_ms":10000}
+```
+
+| Field | Description |
+| --- | --- |
+| `id`, `test_id`, `name`, `suite`, `suite_path`, `script`, `tags` | As in a test object |
+| `timeout_ms` | Resolved timeout in milliseconds, `null` when none applies |
+| `parallel_safe` | Effective value after defaults |
+
+`-f jsonl` prints one object per line; `json`, `junit`, and `teamcity` all print
+a pretty-printed JSON **array** — `list` has no XML or service-message
+rendering. `human` prints names, or the indented block with `--long`.
+
+## Stability
+
+- Field **names** and the `snag.run/v1` schema string are the contract; key
+  order is alphabetical but not part of it.
+- New fields may be added within `v1`; consumers should ignore unknown keys.
+- The human format is for people. Parse `jsonl` or `json` instead.
+
+## See also
+
+- [Reporters guide](../guides/reporters.mdx) — choosing and combining formats
+- [Adding a reporter](../internals/adding-a-reporter.mdx)

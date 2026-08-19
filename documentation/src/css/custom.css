@@ -1,0 +1,174 @@
+/**
+ * Global styles for the Snag documentation site.
+ * Infima variables first, then the small set of components the docs use.
+ */
+
+:root {
+  --ifm-color-primary: #0d7d70;
+  --ifm-color-primary-dark: #0c7165;
+  --ifm-color-primary-darker: #0b6a5f;
+  --ifm-color-primary-darkest: #09574e;
+  --ifm-color-primary-light: #0e8a7b;
+  --ifm-color-primary-lighter: #0f9181;
+  --ifm-color-primary-lightest: #11a794;
+
+  --snag-accent: #d97706;
+  --snag-accent-soft: rgba(217, 119, 6, 0.12);
+  --snag-surface: #ffffff;
+  --snag-surface-muted: #f6f8f8;
+  --snag-border: rgba(13, 125, 112, 0.18);
+  --snag-ink-soft: #5b6b6b;
+  --snag-hero-from: #063f39;
+  --snag-hero-to: #0d7d70;
+
+  --ifm-code-font-size: 92%;
+  --ifm-font-family-base: -apple-system, BlinkMacSystemFont, 'Segoe UI', Inter,
+    Roboto, Helvetica, Arial, sans-serif;
+  --ifm-heading-font-weight: 650;
+  --docusaurus-highlighted-code-line-bg: rgba(13, 125, 112, 0.12);
+}
+
+[data-theme='dark'] {
+  --ifm-color-primary: #3ddac4;
+  --ifm-color-primary-dark: #26d3ba;
+  --ifm-color-primary-darker: #22c7af;
+  --ifm-color-primary-darkest: #1ba490;
+  --ifm-color-primary-light: #55e0ce;
+  --ifm-color-primary-lighter: #62e2d2;
+  --ifm-color-primary-lightest: #86e9dd;
+
+  --snag-accent: #fbbf24;
+  --snag-accent-soft: rgba(251, 191, 36, 0.14);
+  --snag-surface: #1b1f24;
+  --snag-surface-muted: #16191d;
+  --snag-border: rgba(61, 218, 196, 0.18);
+  --snag-ink-soft: #9aa7a7;
+  --snag-hero-from: #04211f;
+  --snag-hero-to: #0b5f56;
+
+  --ifm-background-color: #14171a;
+  --docusaurus-highlighted-code-line-bg: rgba(61, 218, 196, 0.14);
+}
+
+/* Docs reading column: a touch wider than default, easier on tables. */
+.markdown h1:first-child {
+  --ifm-h1-font-size: 2.4rem;
+}
+
+.markdown table {
+  display: table;
+  width: 100%;
+}
+
+.markdown table th {
+  white-space: nowrap;
+}
+
+.markdown code {
+  border: 1px solid var(--snag-border);
+  background-color: var(--snag-surface-muted);
+}
+
+/* Status pills used across the reference pages: <span class="pill pill--pass">. */
+.pill {
+  display: inline-block;
+  padding: 0.1rem 0.55rem;
+  border-radius: 999px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  border: 1px solid var(--snag-border);
+  background: var(--snag-surface-muted);
+  color: var(--ifm-font-color-base);
+}
+
+.pill--pass {
+  border-color: rgba(16, 185, 129, 0.4);
+  background: rgba(16, 185, 129, 0.12);
+}
+
+.pill--fail {
+  border-color: rgba(239, 68, 68, 0.4);
+  background: rgba(239, 68, 68, 0.12);
+}
+
+.pill--skip {
+  border-color: var(--snag-accent);
+  background: var(--snag-accent-soft);
+}
+
+/* Homepage building blocks. */
+.snagHero {
+  position: relative;
+  overflow: hidden;
+  padding: 5rem 0 4rem;
+  color: #f2fbf9;
+  background: linear-gradient(140deg, var(--snag-hero-from), var(--snag-hero-to));
+}
+
+.snagHero::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background-image: radial-gradient(
+    circle at 1px 1px,
+    rgba(255, 255, 255, 0.16) 1px,
+    transparent 0
+  );
+  background-size: 22px 22px;
+  opacity: 0.5;
+  pointer-events: none;
+}
+
+.snagHero > .container {
+  position: relative;
+  z-index: 1;
+}
+
+.snagTerminal {
+  border-radius: 10px;
+  border: 1px solid var(--snag-border);
+  background: #0f1417;
+  color: #e6f2ef;
+  font-family: var(--ifm-font-family-monospace);
+  font-size: 0.86rem;
+  line-height: 1.65;
+  overflow-x: auto;
+  box-shadow: 0 18px 40px rgba(0, 0, 0, 0.28);
+}
+
+.snagTerminal__bar {
+  display: flex;
+  gap: 0.4rem;
+  padding: 0.6rem 0.8rem;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.snagTerminal__dot {
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.22);
+}
+
+.snagTerminal__body {
+  margin: 0;
+  padding: 1rem 1.1rem;
+  white-space: pre;
+}
+
+.snagTerminal__prompt {
+  color: #3ddac4;
+}
+
+.snagTerminal__pass {
+  color: #4ade80;
+}
+
+.snagTerminal__fail {
+  color: #f87171;
+}
+
+.snagTerminal__muted {
+  color: #7c8b8b;
+}

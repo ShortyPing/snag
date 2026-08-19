@@ -1,0 +1,220 @@
+---
+id: suite-files
+title: Suite files and discovery
+sidebar_position: 1
+description: How Snag finds suite files, how paths and globs are interpreted, and how to lay out a repository.
+---
+
+# Suite files and discovery
+
+Discovery is shared by `run`, `list`, and `check`: all three call the same code
+path, so the set of tests `snag list` prints is exactly the set `snag` runs.
+
+## What counts as a suite file
+
+While **walking a directory**, a file is a suite if its name is:
+
+- `suite.toml`
+- `snag.toml`
+- anything ending in `.snag.toml` (for example `checkout.snag.toml`)
+
+Naming a file **explicitly** on the command line bypasses the convention
+entirely — `snag weird-name.toml` runs it.
+
+## How paths are interpreted
+
+| You pass | Snag does |
+| --- | --- |
+| nothing | Walks the current directory recursively |
+| a directory | Walks it recursively |
+| a file | Loads it as a suite, whatever it is called |
+| a glob (`*`, `?`, `[`) | Expands it; matched directories are walked, matched files are kept if they look like suite files |
+
+```bash
+snag                          # everything under .
+snag tests/                   # everything under tests/
+snag tests/auth.snag.toml     # one suite
+snag 'tests/*.snag.toml'      # a glob — quote it so the shell keeps its hands off
+snag tests/ integration/      # several roots at once
+```
+
+Results are sorted and de-duplicated, so overlapping arguments cannot run a
+suite twice.
+
+:::tip Quote your globs
+Unquoted, your shell expands `tests/*.snag.toml` before Snag sees it. That
+usually still works, but the two expanders differ (notably on `**`), and an
+unquoted pattern that matches nothing produces a confusing error. Quoting keeps
+behaviour identical everywhere.
+:::
+
+### Directories that are skipped
+
+While walking, Snag descends into everything except:
+
+- directories whose name starts with `.` (`.git`, `.github`, `.venv` by dot rule)
+- `target`, `node_modules`, `dist`, `build`, `.venv`
+
+Symlinks are not followed. If your suites live inside one of those directories,
+name the path explicitly: `snag build/generated-suite.toml`.
+
+### When nothing is found
+
+```console
+$ snag
+Error: no suite files found (looked for suite.toml / snag.toml / *.snag.toml under the current directory). Run `snag init` to create one.
+```
+
+That is exit code **2** — a setup problem, not a test failure. A path that does
+not exist at all is also an error rather than an empty run.
+
+## Anatomy of a manifest
+
+```toml title="tests/checkout.snag.toml"
+title = "Checkout API"          # shown by reporters; defaults to "Untitled suite"
+timeout = "10s"                 # default per-test timeout for this file
+
+[variables]                     # visible to every test in this file
+base_url = "https://api.example.com"
+currency = "EUR"
+
+[[test]]
+id = "cart-create"              # unique within the file, stable over time
+name = "POST /carts creates a cart"
+tags = ["smoke", "checkout"]
+parallel_safe = true            # false pins the test to the serial phase
+timeout = "20s"                 # overrides the file-level default
+file = "./checkout/cart_create.snag"
+
+[test.variables]                # override suite variables for this test only
+currency = "USD"
+```
+
+Unknown fields are rejected: the manifest is parsed with
+`deny_unknown_fields`, so a typo like `tag = ["smoke"]` fails the load with a
+parse error instead of being silently ignored. Duplicate ids inside one file are
+rejected too.
+
+See the [manifest reference](../reference/manifest.mdx) for every field and its
+default.
+
+## Path resolution
+
+`file` is resolved **relative to the manifest that declares it**, never relative
+to your shell. `snag tests/checkout.snag.toml` and
+`cd tests && snag checkout.snag.toml` load the same scripts.
+
+Paths are normalised lexically for display — `./scripts/./x.snag` prints as
+`scripts/x.snag`. `..` is left alone, because resolving it textually would give
+the wrong answer through a symlink.
+
+## Ids, names, and qualified ids
+
+| Field | Uniqueness | Purpose |
+| --- | --- | --- |
+| `id` | unique per file (enforced) | Filtering, machine reports, stable identity |
+| `name` | free-form | The label a human reads; defaults to `id` |
+| qualified id | unique per run | `<suite path>::<id>`, e.g. `tests/checkout.snag.toml::cart-create` |
+
+The suite path inside a qualified id is the path *as discovered*. Running
+`snag` from the repository root gives `./suite.toml::cart-create`; running
+`snag suite.toml` gives `suite.toml::cart-create`. Pick one invocation for CI so
+that dashboards keyed on the id stay stable.
+
+## Layout patterns
+
+### One suite, flat
+
+Good for a handful of tests.
+
+```
+suite.toml
+get_status.snag
+post_echo.snag
+```
+
+### One suite per domain
+
+The pattern that scales. Each manifest owns a directory of scripts.
+
+```
+tests/
+├── auth.snag.toml
+├── auth/
+│   ├── login.snag
+│   └── refresh.snag
+├── checkout.snag.toml
+└── checkout/
+    ├── create_cart.snag
+    └── pay.snag
+```
+
+```bash
+snag tests/                  # everything
+snag tests/auth.snag.toml    # one domain
+snag tests/ -t smoke         # one tier across domains
+```
+
+### Suites next to the service they test
+
+In a monorepo, keep suites beside their service and let discovery find them:
+
+```
+services/
+├── billing/
+│   ├── src/
+│   └── snag.toml
+└── search/
+    ├── src/
+    └── snag.toml
+```
+
+`snag services/` picks up both. Because `target/`, `node_modules/`, `dist/`, and
+`build/` are skipped, build output cannot pollute the run.
+
+## Environments
+
+Variables are the seam. Two common approaches:
+
+**One suite, environment from the process** — the script reads it:
+
+```js
+let host = env_or("API_BASE_URL", base_url);
+let res = get(`${host}/health`).send();
+assert_ok(res);
+```
+
+**One manifest per environment** — the suites share scripts:
+
+```toml title="tests/staging.snag.toml"
+title = "Checkout (staging)"
+[variables]
+base_url = "https://staging.api.example.com"
+
+[[test]]
+id = "cart-create"
+file = "./checkout/cart_create.snag"
+```
+
+```toml title="tests/prod.snag.toml"
+title = "Checkout (production)"
+[variables]
+base_url = "https://api.example.com"
+
+[[test]]
+id = "cart-create"
+file = "./checkout/cart_create.snag"
+```
+
+```bash
+snag tests/staging.snag.toml
+```
+
+Ids may repeat across files — uniqueness is enforced per file, and the qualified
+id keeps them apart in reports.
+
+## Next
+
+- [Writing scripts](./writing-scripts.mdx)
+- [Variables and secrets](./variables-and-secrets.mdx)
+- [Selecting tests](./selecting-tests.mdx)

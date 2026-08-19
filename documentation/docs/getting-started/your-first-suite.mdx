@@ -1,0 +1,274 @@
+---
+id: your-first-suite
+title: Your first suite
+sidebar_position: 3
+description: Build a suite from scratch — variables, tags, timeouts, serial tests — and understand every field as it appears.
+---
+
+# Your first suite
+
+The quickstart used the scaffold. This page builds a suite by hand against
+`httpbin.org`, introducing one concept per step. At the end you have a layout
+that scales to a real repository.
+
+## Step 1 — the smallest suite that runs
+
+Only two fields are mandatory on a test: `id` and `file`.
+
+```toml title="suite.toml"
+[[test]]
+id = "ping"
+file = "./ping.snag"
+```
+
+```js title="ping.snag"
+let res = get("https://httpbin.org/get").send();
+assert_ok(res);
+```
+
+Everything else has a default: the suite title becomes `Untitled suite`, the
+test name falls back to its id, there are no tags, and the test is
+`parallel_safe = true`.
+
+```console
+$ snag
+running 1 test across 1 suite
+PASS ping [312ms]
+
+test result: ok. 1 passed; 0 failed; 0 timed out; 0 skipped; finished in 313ms
+```
+
+## Step 2 — name things for the report
+
+`name` is what humans read in the report; `id` is what machines match on and
+what appears in the qualified id. Keep ids stable, and let names describe
+behaviour.
+
+```toml title="suite.toml"
+title = "httpbin regression"
+
+[[test]]
+id = "ping"
+name = "GET /get answers 2xx"
+file = "./ping.snag"
+```
+
+Renaming a test is free. Changing an id breaks whatever CI dashboard, filter, or
+`-k` invocation referred to it — treat ids as an API.
+
+## Step 3 — hoist the host into a variable
+
+Variables declared under `[variables]` are shared by every test in the file and
+land in each script's scope as **constants**.
+
+```toml title="suite.toml"
+title = "httpbin regression"
+
+[variables]
+base_url = "https://httpbin.org"
+
+[[test]]
+id = "ping"
+name = "GET /get answers 2xx"
+file = "./ping.snag"
+```
+
+```js title="ping.snag"
+let res = get(`${base_url}/get`).send();
+assert_ok(res);
+```
+
+Backtick strings are Rhai's template literals — `${...}` interpolates. Because
+variables arrive as constants, a script cannot reassign `base_url` and quietly
+retarget itself halfway through.
+
+Variable values are always **strings**. To pass a number or a flag, convert in
+the script: `let retries = retry_count.parse_int();`.
+
+## Step 4 — add tags
+
+Tags are how you slice a suite from the command line: `-t smoke` in a pull
+request, everything nightly.
+
+```toml
+[[test]]
+id = "ping"
+name = "GET /get answers 2xx"
+tags = ["smoke", "network"]
+file = "./ping.snag"
+```
+
+```bash
+snag -t smoke              # tests carrying "smoke"
+snag -t smoke -t nightly   # carrying either — tags are OR-ed
+```
+
+## Step 5 — set timeouts
+
+A timeout can be set for the whole file and overridden per test. Values are
+[humantime](https://docs.rs/humantime) durations: `"500ms"`, `"10s"`, `"2m"`.
+
+```toml title="suite.toml"
+title = "httpbin regression"
+timeout = "10s"          # default for every test in this file
+
+[variables]
+base_url = "https://httpbin.org"
+
+[[test]]
+id = "ping"
+name = "GET /get answers 2xx"
+tags = ["smoke", "network"]
+file = "./ping.snag"
+
+[[test]]
+id = "slow-endpoint"
+name = "GET /delay/3 finishes inside its budget"
+tags = ["slow"]
+timeout = "20s"          # this test gets more room
+file = "./slow.snag"
+```
+
+```js title="slow.snag"
+let res = get(`${base_url}/delay/3`).send();
+assert_ok(res);
+assert_faster_than(res, 8000);
+```
+
+Precedence, loosest to tightest: **file timeout → test timeout → `--timeout`**.
+The CLI flag wins over everything, which is what makes
+`snag --timeout 2s` a useful way to smoke out slow endpoints.
+
+Note the two different mechanisms in `slow.snag`: `timeout` aborts the test,
+while `assert_faster_than` fails it with a message about the budget. Use the
+first as a safety net and the second as the actual performance assertion.
+
+## Step 6 — per-test variable overrides
+
+A test can override any suite variable, which is how one suite covers several
+environments or hosts.
+
+```toml
+[[test]]
+id = "json-api"
+name = "JSON body can be walked by path"
+file = "./json_test.snag"
+
+[test.variables]
+base_url = "https://httpbin.org"
+expected_project = "snag"
+```
+
+`[test.variables]` belongs to the `[[test]]` block directly above it. Test
+variables win over suite variables; there is no deeper merge.
+
+## Step 7 — the test that must not run in parallel
+
+Some tests mutate shared state — a database row, a rate-limited endpoint, a
+singleton fixture. Mark them:
+
+```toml
+[[test]]
+id = "reset-fixtures"
+name = "fixture reset leaves a clean slate"
+parallel_safe = false
+file = "./reset.snag"
+```
+
+Snag partitions the run into two phases: every `parallel_safe = false` test runs
+first, one at a time, in declaration order; the rest then share the worker pool.
+See the [execution model](../guides/execution-model.mdx) for the details.
+
+## Step 8 — split into several suite files
+
+A file is discovered automatically if it is named `suite.toml`, `snag.toml`, or
+ends with `.snag.toml`. That last pattern is the one to use when a repository
+holds several suites:
+
+```
+tests/
+├── auth.snag.toml
+├── auth/
+│   ├── login.snag
+│   └── refresh.snag
+├── checkout.snag.toml
+└── checkout/
+    ├── create_cart.snag
+    └── pay.snag
+```
+
+Script paths inside a manifest are resolved **relative to the manifest**, not to
+your shell's working directory:
+
+```toml title="tests/auth.snag.toml"
+title = "Auth"
+
+[variables]
+base_url = "https://api.example.com"
+
+[[test]]
+id = "login"
+file = "./auth/login.snag"
+```
+
+Now `snag tests/` runs both suites, `snag tests/auth.snag.toml` runs one, and
+`snag 'tests/*.snag.toml'` runs everything matching the glob. Quote globs so
+the shell hands the pattern to Snag rather than expanding it first.
+
+## Step 9 — verify before you run
+
+Two commands cost nothing and catch most mistakes:
+
+```bash
+snag list --long      # is discovery finding what I think it is?
+snag check            # do all manifests parse and all scripts compile?
+```
+
+`check` compiles each script with the same engine and the same registered
+functions the runner uses, so a typo like `assert_stauts` is caught before a
+single request goes out.
+
+## The finished suite
+
+```toml title="tests/httpbin.snag.toml"
+title = "httpbin regression"
+timeout = "10s"
+
+[variables]
+base_url = "https://httpbin.org"
+
+[[test]]
+id = "ping"
+name = "GET /get answers 2xx"
+tags = ["smoke", "network"]
+file = "./httpbin/ping.snag"
+
+[[test]]
+id = "json-api"
+name = "JSON body can be walked by path"
+tags = ["network"]
+file = "./httpbin/json.snag"
+
+[test.variables]
+expected_project = "snag"
+
+[[test]]
+id = "slow-endpoint"
+name = "GET /delay/3 finishes inside its budget"
+tags = ["slow"]
+timeout = "20s"
+file = "./httpbin/slow.snag"
+
+[[test]]
+id = "reset-fixtures"
+name = "fixture reset leaves a clean slate"
+tags = ["fixtures"]
+parallel_safe = false
+file = "./httpbin/reset.snag"
+```
+
+## Next
+
+- [Suite files](../guides/suite-files.mdx) — discovery rules and layout patterns
+- [Writing scripts](../guides/writing-scripts.mdx) — the request/response/assert loop in depth
+- [Manifest reference](../reference/manifest.mdx) — every field, with types and defaults

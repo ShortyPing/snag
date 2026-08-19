@@ -1,0 +1,231 @@
+---
+id: reporters
+title: Reporters and output
+sidebar_position: 6
+description: Human, JSON, JSONL, TeamCity, and JUnit output — and how --report splits the two audiences.
+---
+
+# Reporters and output
+
+One run, five renderings. `--format` picks the reporter; `--report FILE` lets
+you have a human one and a machine one at the same time.
+
+| Format | Emits | Best for |
+| --- | --- | --- |
+| `human` (default) | Colored, streaming lines plus a failure digest | Terminals |
+| `jsonl` | One JSON object per test as it finishes, then a summary object | Streaming consumers, `jq`, log pipelines |
+| `json` | A single document at the end | Artifacts, dashboards, diffing runs |
+| `teamcity` | TeamCity service messages | TeamCity, and IntelliJ's native test tree |
+| `junit` | JUnit XML | GitHub Actions, GitLab, Jenkins, anything that reads JUnit |
+
+Field-by-field definitions live in the
+[report formats reference](../reference/report-formats.mdx). This page is about
+choosing and combining them.
+
+## Human
+
+```console
+$ snag demo/suite.toml -t fast -v
+running 1 test across 1 suite
+PASS assertion helpers, no network [12ms]
+    | running against local
+
+test result: ok. 1 passed; 0 failed; 0 timed out; 0 skipped; finished in 13ms
+```
+
+Line marks are `PASS`, `FAIL`, `TIME` (timed out), and `SKIP`. Retried tests get
+`(after N attempts)`.
+
+Failures are printed twice on purpose: once as a streaming line while the run is
+in flight, then again in a digest at the end with the qualified id, the message,
+and the test's captured output. On a long run, the digest is what you read.
+
+```console
+running 4 tests across 1 suite
+FAIL cart step 1 [28ms]
+SKIP cart step 2 [0ms]
+
+failures:
+
+  cart step 1 (./suite.toml::t1)
+    Runtime error: cart service unavailable (line 1, position 1)
+
+test result: FAILED. 0 passed; 1 failed; 0 timed out; 3 skipped; finished in 29ms
+```
+
+Verbosity:
+
+- `-v` also prints captured output for **passing** tests, prefixed with `|`
+- `-q` prints only failures — no header, no per-test lines for passing tests
+- `--color always|never|auto` overrides TTY detection; use `never` in logs
+
+## JSONL
+
+One object per test, flushed as each finishes, then a final summary object
+distinguished by `"type": "summary"`.
+
+```console
+$ snag demo/suite.toml -t fast -f jsonl
+{"attempts":1,"duration_ms":7,"id":"demo/suite.toml::assertions","message":null,"name":"assertion helpers, no network","output":["running against local"],"script":"demo/assertions_test.snag","status":"passed","suite":"Snag Demo Regression Suite","suite_path":"demo/suite.toml","tags":["fast"],"test_id":"assertions"}
+{"duration_ms":8,"failed":0,"passed":1,"skipped":0,"timed_out":0,"total":1,"type":"summary"}
+```
+
+Because it streams, it is the format to pipe:
+
+```bash
+# Every failing test, as it happens
+snag . -f jsonl | jq -c 'select(.status == "failed")'
+
+# The slowest tests in a run
+snag . -f jsonl | jq -s 'map(select(.type != "summary")) | sort_by(-.duration_ms) | .[:5] | .[] | "\(.duration_ms)ms \(.name)"'
+
+# Tests that only passed on a retry
+snag . --retries 2 -f jsonl | jq -c 'select(.attempts > 1)'
+```
+
+## JSON
+
+A single document, emitted after the run finishes:
+
+```json
+{
+  "schema": "snag.run/v1",
+  "summary": {
+    "duration_ms": 7,
+    "failed": 0,
+    "passed": 1,
+    "skipped": 0,
+    "timed_out": 0,
+    "total": 1,
+    "type": "summary"
+  },
+  "tests": [
+    {
+      "attempts": 1,
+      "duration_ms": 7,
+      "id": "demo/suite.toml::assertions",
+      "message": null,
+      "name": "assertion helpers, no network",
+      "output": ["running against local"],
+      "script": "demo/assertions_test.snag",
+      "status": "passed",
+      "suite": "Snag Demo Regression Suite",
+      "suite_path": "demo/suite.toml",
+      "tags": ["fast"],
+      "test_id": "assertions"
+    }
+  ]
+}
+```
+
+Keys are serialised in alphabetical order — Snag builds the documents with
+`serde_json`'s default map, so field order is stable but not authored. Parse by
+key, never by position.
+
+The `schema` field is there so a consumer can branch on the version rather than
+sniffing the shape. Nothing streams — for live progress use `jsonl`.
+
+## TeamCity
+
+Service messages, which TeamCity and **IntelliJ IDEA** both understand. In
+IntelliJ this gives you a native, clickable test tree, including a jump to the
+script file via `locationHint`.
+
+```console
+$ snag demo/suite.toml -t fast -f teamcity
+##teamcity[testSuiteStarted name='Snag Demo Regression Suite']
+##teamcity[testStarted name='assertion helpers, no network' locationHint='file://demo/assertions_test.snag']
+##teamcity[testStdOut name='assertion helpers, no network' out='running against local']
+##teamcity[testFinished name='assertion helpers, no network' duration='5']
+##teamcity[testSuiteFinished name='snag']
+```
+
+Special characters are escaped per the TeamCity spec (`'`, `|`, `[`, `]`,
+newlines). Failures become `testFailed`, skips become `testIgnored`.
+
+:::tip Running it from IntelliJ
+Create a shell-script or external-tool run configuration whose command is
+`snag --format teamcity`. IntelliJ parses the messages from stdout and renders
+the test tree; the `locationHint` makes each row jump to the `.snag` file.
+:::
+
+## JUnit
+
+XML that CI systems already know how to render:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites name="snag" tests="1" failures="0" skipped="0" time="0.005">
+  <testsuite name="snag" tests="1" failures="0" skipped="0" time="0.005">
+    <testcase classname="Snag Demo Regression Suite" name="assertion helpers, no network" time="0.005">
+      <system-out>running against local</system-out>
+    </testcase>
+  </testsuite>
+</testsuites>
+```
+
+- `classname` is the **suite title**, `name` is the test name.
+- Failures and timeouts both become `<failure>`, with `type` carrying
+  `failed` or `timed_out`.
+- Skips become `<skipped message="…">`.
+- Captured output lands in `<system-out>`.
+- Control characters that are illegal in XML 1.0 are replaced with spaces, so
+  a binary-ish response body cannot produce an unparseable report.
+
+## Two audiences at once
+
+`--report FILE` sends a human report to the terminal *and* a machine report to a
+file:
+
+```bash
+snag . --report report.json          # human on stdout, JSON in the file
+snag . -f junit --report report.xml  # human on stdout, JUnit in the file
+```
+
+The rule for what lands in the file: whatever `--format` says, except that
+`human` is translated to `json` — a human report is nothing a tool can read, so
+asking for one in a file is treated as asking for the default machine format.
+
+| Invocation | Terminal | File |
+| --- | --- | --- |
+| `--report f` | human | JSON |
+| `-f json --report f` | human | JSON |
+| `-f junit --report f` | human | JUnit XML |
+| `-f jsonl --report f` | human | JSONL |
+| `-f junit` (no `--report`) | JUnit XML on stdout | — |
+
+Without `--report`, the chosen format goes to stdout and nothing else does.
+
+If the file cannot be created, the run fails before executing anything:
+
+```console
+$ snag . --report /nope/report.json
+Error: cannot write report to /nope/report.json: No such file or directory (os error 2)
+```
+
+## Captured output
+
+`print`, `debug`, and `print_response` are captured per test rather than written
+to stdout, so parallel tests never interleave. Where that output surfaces:
+
+| Reporter | Passing test | Failing test |
+| --- | --- | --- |
+| human | only with `-v`, prefixed `\|` | in the failure digest |
+| jsonl / json | `output` array | `output` array |
+| teamcity | `testStdOut` messages | `testStdOut` messages |
+| junit | `<system-out>` | `<system-out>` |
+
+## Choosing
+
+- **Local development** — `human`, plus `-v` when you want to see prints.
+- **Pull-request CI** — `-f junit --report report.xml`, so the log stays readable
+  and the platform still renders a test tree.
+- **Dashboards or trend analysis** — `-f json --report run.json`, keyed on the
+  qualified id.
+- **Live streaming into a log processor** — `jsonl`.
+- **IntelliJ / TeamCity** — `teamcity`.
+
+## Next
+
+- [Report formats reference](../reference/report-formats.mdx) — every field
+- [CI integration](./ci-integration.mdx) — complete workflows

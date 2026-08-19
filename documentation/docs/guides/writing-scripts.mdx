@@ -1,0 +1,294 @@
+---
+id: writing-scripts
+title: Writing scripts
+sidebar_position: 2
+description: Build requests, inspect responses, walk JSON bodies, and assert — the full test-authoring loop in Rhai.
+---
+
+# Writing scripts
+
+A `.snag` file is a [Rhai](https://rhai.rs) script. It runs top to bottom, and
+the test passes if the script finishes without throwing. Any error — a failed
+assertion, a network error, an explicit `fail(...)` — ends the test with that
+message.
+
+For the exhaustive list of functions, see the
+[script API reference](../reference/script-api.mdx). This page is about how to
+put them together.
+
+## The shape of a test
+
+```js title="cart_create.snag"
+let res = post(`${base_url}/carts`)
+    .header("accept", "application/json")
+    .json(#{ currency: "EUR" })
+    .send();
+
+assert_status(res, 201);
+assert_faster_than(res, 800);
+assert_eq(field(res.json(), "currency"), "EUR");
+```
+
+Build a request, `.send()` it, then assert. `.send()` is the only call that
+touches the network — everything before it is local bookkeeping.
+
+## Rhai in 60 seconds
+
+Enough of the language to write tests:
+
+```js
+let x = 41;                    // variables
+const LIMIT = 500;             // constants
+let s = `total: ${x + 1}`;     // template strings with interpolation
+let map = #{ a: 1, b: "two" }; // object map
+let list = [1, 2, 3];          // array
+
+if x > 40 { print("big"); }
+for item in list { print(item); }
+
+fn double(n) { n * 2 }         // functions
+print(double(21));
+
+let n = "42".parse_int();      // string → int
+print(list.len());             // 3
+print("abc".to_upper());       // ABC
+```
+
+Rhai has no `null`; the empty value is `()` (unit). Full language docs live at
+[rhai.rs](https://rhai.rs/book/).
+
+## Requests
+
+Six constructors — `get`, `post`, `put`, `patch`, `delete`, `head` — each taking
+a URL and returning a builder. Builder methods chain and return a new builder;
+`.send()` performs the request.
+
+```js
+let res = get(`${base_url}/users?page=2`)
+    .header("accept", "application/json")
+    .header("x-request-id", "snag-42")
+    .send();
+```
+
+| Method | Effect |
+| --- | --- |
+| `.header(name, value)` | Adds a header. Repeatable. |
+| `.bearer(token)` | Adds `authorization: Bearer <token>`. |
+| `.body(text)` | Sets a raw string body. No content type is added. |
+| `.json(value)` | Serialises `value` to JSON and sets `content-type: application/json`. |
+
+`.json()` takes any Rhai value — usually an object map:
+
+```js
+let res = post(`${base_url}/carts`)
+    .json(#{
+        currency: "EUR",
+        items: [
+            #{ sku: "A-1", qty: 2 },
+            #{ sku: "B-7", qty: 1 },
+        ],
+    })
+    .send();
+```
+
+Prefer `.json()` over hand-rolled strings: it sets the header for you and it
+cannot produce malformed JSON from a value that interpolated badly.
+
+### Authentication
+
+```js
+// Bearer token from the environment
+let res = get(`${base_url}/me`).bearer(env("API_TOKEN")).send();
+
+// HTTP Basic — basic() returns the full "Basic <base64>" header value
+let res = get(`${base_url}/me`)
+    .header("authorization", basic("demo", env("API_PASSWORD")))
+    .send();
+
+// Anything else is just a header
+let res = get(`${base_url}/me`).header("x-api-key", env("API_KEY")).send();
+```
+
+`env("NAME")` fails the test if the variable is unset — which is the behaviour
+you want for a credential. `env_or("NAME", "default")` falls back silently.
+
+## Responses
+
+```js
+let res = get(`${base_url}/get`).send();
+
+res.status         // 200 (integer)
+res.ok             // true when 200..=299
+res.text           // body as a string
+res.duration_ms    // wall-clock time for this request
+res.header("content-type")   // case-insensitive; "" when absent
+res.json()         // parses res.text; fails the test if it is not JSON
+```
+
+`res.header(...)` returns an empty string for a missing header rather than
+throwing, so `assert_contains(res.header("content-type"), "json")` fails with a
+clear message instead of exploding.
+
+## Walking a JSON body
+
+`res.json()` decodes into Rhai values: objects become maps, arrays become
+arrays. Index them directly, or use `field()` with a dotted path:
+
+```js
+let body = res.json();
+
+// Direct indexing
+assert_eq(body.json.project, "snag");
+
+// Dotted path, numeric segments index arrays
+assert_eq(field(body, "json.project"), "snag");
+assert_eq(field(body, "items.0.sku"), "A-1");
+```
+
+The difference matters when a path is wrong:
+
+| Expression | Missing key behaviour |
+| --- | --- |
+| `body.items[3].sku` | Rhai's own error, sometimes an unhelpful one |
+| `field(body, "items.3.sku")` | `index 3 out of range in path 'items.3.sku'` |
+
+`field()` reports which segment failed and why — a missing key, an out-of-range
+index, or a descent into a scalar. Use it for anything more than one level deep.
+
+## Assertions
+
+```js
+assert_status(res, 201);                  // exact status, prints the body on failure
+assert_ok(res);                           // any 2xx
+assert_body_contains(res, "Example");     // substring of the raw body
+assert_faster_than(res, 800);             // duration budget in ms
+assert_eq(actual, expected);              // ints, floats, bools, strings
+assert_contains("haystack", "needle");    // string containment
+assert(cond, "message");                  // arbitrary condition
+fail("unreachable state");                // unconditional failure
+```
+
+Assertion messages are built to be read in a CI log:
+
+```
+assertion failed: expected status 201, got 500
+body: {"error":"cart service unavailable"}
+```
+
+`assert_status`, `assert_ok`, and `assert_body_contains` include up to 500
+characters of the body, with a `… (N bytes total)` suffix when truncated.
+
+:::note assert_eq is not generic
+Rhai has no generics, so `assert_eq` is registered once per scalar type:
+integer, float, bool, and string. Comparing two maps or two arrays with it will
+not resolve. Compare the fields you care about, or compare a rendered form.
+:::
+
+## Chaining requests
+
+Nothing stops a script from making several calls — this is the main reason
+assertions are a language rather than a config format.
+
+```js title="cart_flow.snag"
+// 1. create
+let created = post(`${base_url}/carts`).json(#{ currency: "EUR" }).send();
+assert_status(created, 201);
+
+let cart_id = field(created.json(), "id");
+
+// 2. read back
+let fetched = get(`${base_url}/carts/${cart_id}`).send();
+assert_ok(fetched);
+assert_eq(field(fetched.json(), "id"), cart_id);
+
+// 3. clean up
+let deleted = delete(`${base_url}/carts/${cart_id}`).send();
+assert_status(deleted, 204);
+```
+
+A script is one test: if step 2 fails, steps 3 never runs and the whole test is
+reported as failed. When you want independent reporting per step, make them
+separate tests — and remember they may then run in parallel.
+
+## Loops and polling
+
+```js
+// Poll until a job finishes, up to ~5 seconds
+let job_id = field(post(`${base_url}/jobs`).json(#{ kind: "report" }).send().json(), "id");
+
+let state = "pending";
+for i in 0..10 {
+    let res = get(`${base_url}/jobs/${job_id}`).send();
+    assert_ok(res);
+    state = field(res.json(), "state");
+    if state == "done" { break; }
+    sleep_ms(500);
+}
+
+assert_eq(state, "done");
+```
+
+Bound every loop. A test with a timeout is interrupted by the interpreter's
+progress hook, but an unbounded loop in a test *without* a timeout will run
+until the process is killed.
+
+## Printing and debugging
+
+`print(...)` and `debug(...)` are captured per test, not written to stdout, so
+parallel tests never interleave their output.
+
+```js
+print(`served in ${res.duration_ms}ms`);
+print_response(res);      // status, timing, all headers, first 40 body lines
+```
+
+Captured output appears:
+
+- under a failing test in the human report, prefixed with `|`
+- for **passing** tests only with `-v`
+- in the `output` array of the JSON/JSONL reports
+- as `testStdOut` service messages in TeamCity, `<system-out>` in JUnit
+
+```console
+$ snag -t fast -v
+running 1 test across 1 suite
+PASS assertion helpers, no network [12ms]
+    | running against local
+```
+
+## Non-HTTP helpers
+
+```js
+env("API_TOKEN")                  // fails the test when unset
+env_or("SNAG_STAGE", "local")     // falls back
+sleep_ms(250)                     // blocks this test's worker only
+parse_json(`{"a":1}`)             // parse a JSON string you built yourself
+```
+
+`sleep_ms` occupies its worker for the duration; with `-j 1` it blocks the whole
+run.
+
+## Patterns worth copying
+
+**Guard on the environment before doing work**
+
+```js
+assert(base_url.starts_with("https://"), "base_url must be https");
+```
+
+**Assert the contract, not the payload.** Asserting on every field makes a test
+that fails for unrelated reasons. Assert the status, the shape, and the fields
+your consumers depend on.
+
+**Give each assertion a reason to exist.** `assert(res.status != 500, "…")` after
+`assert_status(res, 200)` is noise — the first assertion already covers it.
+
+**Keep timing assertions loose.** `assert_faster_than(res, 5000)` catches a
+service that has fallen over; `assert_faster_than(res, 50)` catches your CI
+runner having a bad morning.
+
+## Next
+
+- [Script API reference](../reference/script-api.mdx) — every function, with signatures
+- [Variables and secrets](./variables-and-secrets.mdx)
+- [Execution model](./execution-model.mdx) — timeouts, retries, parallelism
