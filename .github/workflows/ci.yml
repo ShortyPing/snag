@@ -4,7 +4,13 @@ on:
   push:
     branches-ignore:
       - main
+    paths-ignore:
+      - 'documentation/**'
+      - '**.md'
   pull_request:
+    paths-ignore:
+      - 'documentation/**'
+      - '**.md'
   workflow_dispatch:
 
 concurrency:

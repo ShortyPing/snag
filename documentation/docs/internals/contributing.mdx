@@ -128,6 +128,10 @@ pnpm typecheck      # TypeScript for the React components
 `pnpm build` fails on broken internal links (`onBrokenLinks: 'throw'`), so run it
 before pushing documentation changes.
 
+`.github/workflows/docs.yml` runs `pnpm typecheck` and `pnpm build` for every
+pull request that touches `documentation/`, and publishes the built site to
+GitHub Pages on a push to `main`.
+
 ### Where pages live
 
 ```
