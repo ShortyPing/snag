@@ -119,6 +119,7 @@ pub struct Test {
 }
 
 impl Test {
+    #[must_use] 
     pub fn qualified_id(&self) -> String {
         format!("{}::{}", self.suite_path.display(), self.id)
     }

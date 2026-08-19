@@ -15,6 +15,7 @@ pub enum Status {
 }
 
 impl Status {
+    #[must_use] 
     pub fn as_str(self) -> &'static str {
         match self {
             Status::Passed => "passed",
@@ -24,6 +25,7 @@ impl Status {
         }
     }
 
+    #[must_use] 
     pub fn is_failure(self) -> bool {
         matches!(self, Status::Failed | Status::TimedOut)
     }
@@ -49,10 +51,12 @@ pub struct Summary {
 }
 
 impl Summary {
+    #[must_use] 
     pub fn total(&self) -> usize {
         self.passed + self.failed + self.timed_out + self.skipped
     }
 
+    #[must_use] 
     pub fn is_green(&self) -> bool {
         self.failed == 0 && self.timed_out == 0
     }
@@ -101,6 +105,7 @@ impl Reporter for Multi {
     }
 }
 
+#[must_use] 
 pub fn reporter_for(format: Format, ctx: &Ctx, out: Box<dyn Write + Send>) -> Box<dyn Reporter> {
     match format {
         Format::Human => Box::new(Human::new(out, ctx.color, ctx.quiet, ctx.verbose > 0)),
@@ -241,6 +246,7 @@ fn plural(n: usize) -> &'static str {
     if n == 1 { "" } else { "s" }
 }
 
+#[must_use] 
 pub fn fmt_duration(d: Duration) -> String {
     let ms = d.as_millis();
     if ms < 1000 {
@@ -344,8 +350,7 @@ impl Reporter for TeamCity {
     fn run_started(&mut self, tests: &[Test]) -> anyhow::Result<()> {
         let name = tests
             .first()
-            .map(|t| t.suite_title.as_str())
-            .unwrap_or("snag");
+            .map_or("snag", |t| t.suite_title.as_str());
         writeln!(
             self.out,
             "##teamcity[testSuiteStarted name='{}']",

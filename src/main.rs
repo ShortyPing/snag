@@ -154,9 +154,9 @@ pub enum Format {
     Jsonl,
     /// A single JSON document emitted at the end.
     Json,
-    /// TeamCity service messages.
+    /// `TeamCity` service messages.
     Teamcity,
-    /// JUnit XML.
+    /// `JUnit` XML.
     Junit,
 }
 
@@ -222,7 +222,7 @@ fn main() -> ExitCode {
         // A closed pipe (`snag list | head`) isn't an error.
         Err(err) if is_broken_pipe(&err) => Exit::Ok.into(),
         Err(err) => {
-            eprintln!("Error: {}", err);
+            eprintln!("Error: {err}");
             Exit::Error.into()
         }
     }
@@ -387,11 +387,11 @@ file = "./get_status.snag"
 expected = "200"
 "#;
 
-    const SCRIPT_TEMPLATE: &str = r#"let res = get(`${base_url}/status/200`).send();
+    const SCRIPT_TEMPLATE: &str = r"let res = get(`${base_url}/status/200`).send();
 
 assert_status(res, 200);
 assert_faster_than(res, 5000);
-"#;
+";
 
     if args.path.exists() && !args.force {
         anyhow::bail!(

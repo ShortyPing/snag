@@ -10,6 +10,7 @@ use std::time::Duration;
 // Per-test capture buffer, so parallel output doesn't interleave.
 pub type OutputSink = Arc<Mutex<Vec<String>>>;
 
+#[must_use] 
 pub fn new_sink() -> OutputSink {
     Arc::new(Mutex::new(Vec::new()))
 }
@@ -33,6 +34,7 @@ pub struct TeardownCallback {
 // leaves the worker thread that built it.
 pub type TeardownQueue = Rc<RefCell<Vec<TeardownCallback>>>;
 
+#[must_use] 
 pub fn new_teardown_queue() -> TeardownQueue {
     Rc::new(RefCell::new(Vec::new()))
 }
@@ -143,7 +145,7 @@ pub fn register_http(engine: &mut Engine, client: reqwest::blocking::Client) {
         },
     );
 
-    engine.register_get("status", |r: &mut Response| r.status as i64);
+    engine.register_get("status", |r: &mut Response| i64::from(r.status));
     engine.register_get("ok", |r: &mut Response| (200..300).contains(&r.status));
     engine.register_get("text", |r: &mut Response| r.text.clone());
     engine.register_get("duration_ms", |r: &mut Response| r.duration_ms as i64);
@@ -151,11 +153,11 @@ pub fn register_http(engine: &mut Engine, client: reqwest::blocking::Client) {
     engine.register_fn(
         "basic",
         |username: String, password: String| -> Result<String, Box<EvalAltResult>> {
-            let str = format!("{}:{}", username, password);
+            let str = format!("{username}:{password}");
             let bytes = str.as_bytes();
             let encoded = BASE64_STANDARD.encode(bytes);
 
-            Ok(format!("Basic {}", encoded))
+            Ok(format!("Basic {encoded}"))
         },
     );
     engine.register_fn("header", |r: &mut Response, name: &str| {
