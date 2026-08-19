@@ -10,7 +10,7 @@ use std::time::Duration;
 // Per-test capture buffer, so parallel output doesn't interleave.
 pub type OutputSink = Arc<Mutex<Vec<String>>>;
 
-#[must_use] 
+#[must_use]
 pub fn new_sink() -> OutputSink {
     Arc::new(Mutex::new(Vec::new()))
 }
@@ -34,7 +34,7 @@ pub struct TeardownCallback {
 // leaves the worker thread that built it.
 pub type TeardownQueue = Rc<RefCell<Vec<TeardownCallback>>>;
 
-#[must_use] 
+#[must_use]
 pub fn new_teardown_queue() -> TeardownQueue {
     Rc::new(RefCell::new(Vec::new()))
 }
