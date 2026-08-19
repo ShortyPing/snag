@@ -1,16 +1,18 @@
 use std::fs;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::mpsc;
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use reqwest::blocking::Client;
-use rhai::{Dynamic, Engine, EvalAltResult, Scope};
+use rhai::{AST, CallFnOptions, Dynamic, Engine, EvalAltResult, Scope};
 
 use crate::discovery::discover;
-use crate::manifest::Test;
+use crate::manifest::{Hook, Test};
 use crate::report::{Multi, Outcome, Reporter, Status, Summary, reporter_for};
 use crate::scripting_registration::{
-    new_sink, register_assertions, register_debug, register_env, register_http,
+    OutputSink, TeardownQueue, new_sink, new_teardown_queue, register_assertions, register_debug,
+    register_env, register_http, register_teardown,
 };
 use crate::{Ctx, Exit, Format, RunArgs};
 
@@ -92,21 +94,33 @@ pub fn check(ctx: &Ctx, tests: &[Test]) -> anyhow::Result<Exit> {
 }
 
 fn compile(test: &Test) -> anyhow::Result<()> {
-    if !test.script.exists() {
-        anyhow::bail!("script {} does not exist", test.script.display());
-    }
-    let source = fs::read_to_string(&test.script)?;
-
     let mut engine = Engine::new();
     register_http(&mut engine, Client::new());
     register_debug(&mut engine, new_sink());
     register_assertions(&mut engine);
     register_env(&mut engine);
+    register_teardown(&mut engine, new_teardown_queue());
 
-    engine
-        .compile(&source)
-        .map_err(|e| anyhow::anyhow!("{} ({})", e, test.script.display()))?;
+    // Hooks are part of the test: a broken setup script is a broken test.
+    let scripts = test
+        .setup
+        .iter()
+        .chain(&test.teardown)
+        .map(|h| h.script.as_path())
+        .chain(std::iter::once(test.script.as_path()));
+
+    for path in scripts {
+        compile_file(&engine, path).map_err(|e| anyhow::anyhow!("{} ({})", e, path.display()))?;
+    }
     Ok(())
+}
+
+fn compile_file(engine: &Engine, path: &Path) -> anyhow::Result<AST> {
+    if !path.exists() {
+        anyhow::bail!("script {} does not exist", path.display());
+    }
+    let source = fs::read_to_string(path)?;
+    engine.compile(&source).map_err(|e| anyhow::anyhow!("{e}"))
 }
 
 fn build_reporter(ctx: &Ctx, args: &RunArgs) -> anyhow::Result<Box<dyn Reporter>> {
@@ -259,28 +273,7 @@ enum Failure {
     Error(String),
 }
 
-fn execute_once(
-    test: &Test,
-    timeout: Option<Duration>,
-    sink: &crate::scripting_registration::OutputSink,
-) -> Result<(), Failure> {
-    if !test.script.exists() {
-        return Err(Failure::Error(format!(
-            "script {} does not exist",
-            test.script.display()
-        )));
-    }
-
-    let source = match fs::read_to_string(&test.script) {
-        Ok(s) => s,
-        Err(e) => {
-            return Err(Failure::Error(format!(
-                "reading {}: {e}",
-                test.script.display()
-            )));
-        }
-    };
-
+fn execute_once(test: &Test, timeout: Option<Duration>, sink: &OutputSink) -> Result<(), Failure> {
     // The client needs the deadline too: on_progress can't interrupt a socket
     // that's already blocked on a read.
     let mut builder = Client::builder();
@@ -292,21 +285,55 @@ fn execute_once(
         Err(e) => return Err(Failure::Error(format!("building HTTP client: {e}"))),
     };
 
+    let teardowns = new_teardown_queue();
+
     let mut engine = Engine::new();
     register_http(&mut engine, client);
     register_debug(&mut engine, sink.clone());
     register_assertions(&mut engine);
     register_env(&mut engine);
+    register_teardown(&mut engine, teardowns.clone());
 
-    if let Some(limit) = timeout {
-        let deadline = Instant::now() + limit;
+    // Shared so the teardown phase can be handed a fresh budget: cleanup after
+    // a timed-out test would otherwise abort on the very first operation.
+    let deadline: Arc<Mutex<Option<Instant>>> =
+        Arc::new(Mutex::new(timeout.map(|limit| Instant::now() + limit)));
+    if timeout.is_some() {
+        let deadline = deadline.clone();
         engine.on_progress(move |ops| {
-            if ops % PROGRESS_INTERVAL == 0 && Instant::now() >= deadline {
-                // Returning any value aborts with ErrorTerminated.
-                return Some(Dynamic::UNIT);
+            if ops % PROGRESS_INTERVAL == 0 {
+                let expired = deadline
+                    .lock()
+                    .is_ok_and(|deadline| deadline.is_some_and(|at| Instant::now() >= at));
+                if expired {
+                    // Returning any value aborts with ErrorTerminated.
+                    return Some(Dynamic::UNIT);
+                }
             }
             None
         });
+    }
+
+    // Compile everything up front so a broken hook fails before the first
+    // request goes out.
+    let setup = match compile_hooks(&engine, &test.setup) {
+        Ok(asts) => asts,
+        Err(msg) => return Err(Failure::Error(format!("setup: {msg}"))),
+    };
+    let teardown = match compile_hooks(&engine, &test.teardown) {
+        Ok(asts) => asts,
+        Err(msg) => return Err(Failure::Error(format!("teardown: {msg}"))),
+    };
+    let body = match compile_file(&engine, &test.script) {
+        Ok(ast) => ast,
+        Err(e) => return Err(Failure::Error(e.to_string())),
+    };
+
+    // Closures registered with on_teardown live in the AST that defined them,
+    // so calling them later needs every script's functions in one AST.
+    let mut functions = body.clone_functions_only();
+    for (_, ast) in setup.iter().chain(&teardown) {
+        functions = functions.merge(ast);
     }
 
     // Push vars as constants so a script can read `base_url` but not reassign it.
@@ -316,9 +343,170 @@ fn execute_once(
     }
 
     let started = Instant::now();
-    match engine.run_with_scope(&mut scope, &source) {
-        Ok(()) => Ok(()),
-        Err(e) => Err(classify(*e, timeout, started)),
+    let result = run_test_body(&engine, &mut scope, &setup, &body, timeout, started);
+
+    // Cleanup gets its own budget, measured from here.
+    let teardown_started = Instant::now();
+    if let Some(limit) = timeout
+        && let Ok(mut deadline) = deadline.lock()
+    {
+        *deadline = Some(teardown_started + limit);
+    }
+
+    let cleanup = run_teardown(
+        &engine,
+        &mut scope,
+        &teardowns,
+        &functions,
+        &body,
+        &teardown,
+        result.is_err(),
+        timeout,
+        teardown_started,
+        sink,
+    );
+
+    // A failing test keeps its own message; teardown noise goes to the output.
+    result.and(cleanup)
+}
+
+fn compile_hooks(engine: &Engine, hooks: &[Hook]) -> Result<Vec<(Hook, AST)>, String> {
+    hooks
+        .iter()
+        .map(|hook| {
+            compile_file(engine, &hook.script)
+                .map(|ast| (hook.clone(), ast))
+                .map_err(|e| format!("{}: {e}", hook.script.display()))
+        })
+        .collect()
+}
+
+// Setup scripts, then a `fn setup()` in the test script, then the test itself.
+// All of it shares one scope, so a setup script can hand the test a variable.
+fn run_test_body(
+    engine: &Engine,
+    scope: &mut Scope,
+    setup: &[(Hook, AST)],
+    body: &AST,
+    timeout: Option<Duration>,
+    started: Instant,
+) -> Result<(), Failure> {
+    for (hook, ast) in setup {
+        engine
+            .run_ast_with_scope(scope, ast)
+            .map_err(|e| phase_failure("setup", Some(&hook.script), *e, timeout, started))?;
+    }
+
+    if defines(body, "setup") {
+        call_hook_fn(engine, scope, body, "setup")
+            .map_err(|e| phase_failure("setup", None, *e, timeout, started))?;
+    }
+
+    engine
+        .run_ast_with_scope(scope, body)
+        .map_err(|e| classify(*e, timeout, started))
+}
+
+// Unwinds in reverse: on_teardown callbacks last-registered first, then a
+// `fn teardown()`, then the teardown scripts (test's own before the suite's).
+#[allow(clippy::too_many_arguments)]
+fn run_teardown(
+    engine: &Engine,
+    scope: &mut Scope,
+    queue: &TeardownQueue,
+    functions: &AST,
+    body: &AST,
+    hooks: &[(Hook, AST)],
+    failed: bool,
+    timeout: Option<Duration>,
+    started: Instant,
+    sink: &OutputSink,
+) -> Result<(), Failure> {
+    let callbacks = queue.borrow().clone();
+
+    // The first error is what a passing test fails with; the rest would be lost,
+    // so they go to the captured output instead.
+    let mut first: Option<Failure> = None;
+    let mut record = |failure: Failure, sink: &OutputSink| {
+        if !failed && first.is_none() {
+            first = Some(failure);
+            return;
+        }
+        if let Ok(mut guard) = sink.lock() {
+            guard.push(match failure {
+                Failure::TimedOut => "teardown timed out".to_string(),
+                Failure::Error(msg) => msg,
+            });
+        }
+    };
+
+    for callback in callbacks.iter().rev() {
+        if failed && !callback.always {
+            continue;
+        }
+        if let Err(e) = callback.func.call::<Dynamic>(engine, functions, ()) {
+            record(phase_failure("teardown", None, *e, timeout, started), sink);
+        }
+    }
+
+    if defines(body, "teardown")
+        && let Err(e) = call_hook_fn(engine, scope, body, "teardown")
+    {
+        record(phase_failure("teardown", None, *e, timeout, started), sink);
+    }
+
+    for (hook, ast) in hooks {
+        if failed && !hook.always {
+            continue;
+        }
+        if let Err(e) = engine.run_ast_with_scope(scope, ast) {
+            record(
+                phase_failure("teardown", Some(&hook.script), *e, timeout, started),
+                sink,
+            );
+        }
+    }
+
+    match first {
+        Some(failure) => Err(failure),
+        None => Ok(()),
+    }
+}
+
+// eval_ast(false) keeps the top-level statements from running again;
+// rewind_scope(false) lets `fn setup()` leave variables behind for the test.
+fn call_hook_fn(
+    engine: &Engine,
+    scope: &mut Scope,
+    ast: &AST,
+    name: &str,
+) -> Result<(), Box<EvalAltResult>> {
+    let options = CallFnOptions::new().eval_ast(false).rewind_scope(false);
+    engine
+        .call_fn_with_options::<Dynamic>(options, scope, ast, name, ())
+        .map(|_| ())
+}
+
+fn defines(ast: &AST, name: &str) -> bool {
+    ast.iter_functions()
+        .any(|f| f.name == name && f.params.is_empty())
+}
+
+// Same classification as the test body, but the message says which phase and
+// which script blew up.
+fn phase_failure(
+    phase: &str,
+    script: Option<&Path>,
+    err: EvalAltResult,
+    timeout: Option<Duration>,
+    started: Instant,
+) -> Failure {
+    match classify(err, timeout, started) {
+        Failure::TimedOut => Failure::TimedOut,
+        Failure::Error(msg) => Failure::Error(match script {
+            Some(path) => format!("{phase} {}: {msg}", path.display()),
+            None => format!("{phase}: {msg}"),
+        }),
     }
 }
 
@@ -364,6 +552,8 @@ mod tests {
             parallel_safe: true,
             script: PathBuf::from("t.snag"),
             vars: BTreeMap::new(),
+            setup: vec![],
+            teardown: vec![],
             suite_title: "s".into(),
             suite_path: PathBuf::from("suite.toml"),
         }
@@ -388,6 +578,20 @@ mod tests {
             script: path,
             ..dummy(id)
         }
+    }
+
+    fn hook(path: PathBuf, always: bool) -> Hook {
+        Hook {
+            script: path,
+            always,
+        }
+    }
+
+    // Runs one test on its own and hands back the outcome.
+    fn run_one(test: Test) -> Outcome {
+        let (result, _, recorder) = batch(&[test], &args(), 1, &AtomicBool::new(false));
+        result.unwrap();
+        recorder.finished.into_iter().next().unwrap()
     }
 
     fn args() -> RunArgs {
@@ -656,6 +860,229 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(summary.timed_out, 1);
         assert_eq!(recorder.finished[0].status, Status::TimedOut);
+    }
+
+    #[test]
+    fn a_setup_script_shares_its_scope_with_the_test() {
+        let setup = script("setup_scope.snag", r#"let token = "s3cret";"#);
+        let body = script("setup_scope_body.snag", r#"print("token=" + token);"#);
+
+        let test = Test {
+            setup: vec![hook(setup, true)],
+            ..with_script("t0", body)
+        };
+        let outcome = run_one(test);
+
+        assert_eq!(outcome.status, Status::Passed, "{:?}", outcome.message);
+        assert_eq!(outcome.output, ["token=s3cret".to_string()]);
+    }
+
+    #[test]
+    fn a_failing_setup_fails_the_test_without_running_it() {
+        let setup = script("setup_boom.snag", r#"throw "no database";"#);
+        let body = script("setup_boom_body.snag", r#"print("ran");"#);
+
+        let test = Test {
+            setup: vec![hook(setup, true)],
+            ..with_script("t0", body)
+        };
+        let outcome = run_one(test);
+
+        assert_eq!(outcome.status, Status::Failed);
+        let message = outcome.message.unwrap_or_default();
+        assert!(message.starts_with("setup "), "{message}");
+        assert!(message.contains("setup_boom.snag"), "{message}");
+        assert!(message.contains("no database"), "{message}");
+        assert!(outcome.output.is_empty(), "{:?}", outcome.output);
+    }
+
+    #[test]
+    fn a_missing_setup_script_fails_the_test() {
+        let body = script("missing_setup_body.snag", "let x = 1;");
+
+        let test = Test {
+            setup: vec![hook(PathBuf::from("nowhere.snag"), true)],
+            ..with_script("t0", body)
+        };
+        let outcome = run_one(test);
+
+        assert_eq!(outcome.status, Status::Failed);
+        assert!(
+            outcome
+                .message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("does not exist"),
+            "{:?}",
+            outcome.message
+        );
+    }
+
+    #[test]
+    fn teardown_scripts_run_in_order_after_the_test() {
+        let first = script("teardown_first.snag", r#"print("first");"#);
+        let second = script("teardown_second.snag", r#"print("second");"#);
+        let body = script("teardown_order_body.snag", r#"print("body");"#);
+
+        let test = Test {
+            teardown: vec![hook(first, true), hook(second, true)],
+            ..with_script("t0", body)
+        };
+        let outcome = run_one(test);
+
+        assert_eq!(outcome.status, Status::Passed);
+        assert_eq!(outcome.output, ["body", "first", "second"]);
+    }
+
+    #[test]
+    fn a_failed_test_skips_teardown_that_is_not_always() {
+        let always = script("teardown_always.snag", r#"print("always");"#);
+        let sometimes = script("teardown_sometimes.snag", r#"print("sometimes");"#);
+        let body = script("teardown_failed_body.snag", r#"throw "boom";"#);
+
+        let test = Test {
+            teardown: vec![hook(sometimes, false), hook(always, true)],
+            ..with_script("t0", body)
+        };
+        let outcome = run_one(test);
+
+        assert_eq!(outcome.status, Status::Failed);
+        assert_eq!(outcome.output, ["always"]);
+    }
+
+    #[test]
+    fn a_failing_teardown_fails_an_otherwise_passing_test() {
+        let bad = script("teardown_boom.snag", r#"throw "cleanup failed";"#);
+        let body = script("teardown_boom_body.snag", "let x = 1;");
+
+        let test = Test {
+            teardown: vec![hook(bad, true)],
+            ..with_script("t0", body)
+        };
+        let outcome = run_one(test);
+
+        assert_eq!(outcome.status, Status::Failed);
+        let message = outcome.message.unwrap_or_default();
+        assert!(message.starts_with("teardown "), "{message}");
+        assert!(message.contains("teardown_boom.snag"), "{message}");
+    }
+
+    #[test]
+    fn a_failing_teardown_keeps_the_tests_own_failure() {
+        let bad = script("teardown_after_fail.snag", r#"throw "cleanup failed";"#);
+        let body = script("teardown_after_fail_body.snag", r#"throw "the real bug";"#);
+
+        let test = Test {
+            teardown: vec![hook(bad, true)],
+            ..with_script("t0", body)
+        };
+        let outcome = run_one(test);
+
+        assert_eq!(outcome.status, Status::Failed);
+        assert!(
+            outcome
+                .message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("the real bug"),
+            "{:?}",
+            outcome.message
+        );
+        // The cleanup error is still visible, just not as the headline.
+        assert!(
+            outcome.output.iter().any(|l| l.contains("cleanup failed")),
+            "{:?}",
+            outcome.output
+        );
+    }
+
+    #[test]
+    fn script_setup_and_teardown_functions_run_around_the_body() {
+        let body = script(
+            "fn_hooks.snag",
+            r#"
+fn setup() { let user = "kim"; print("setup"); }
+fn teardown() { print("teardown"); }
+print("body " + user);
+"#,
+        );
+        let outcome = run_one(with_script("t0", body));
+
+        assert_eq!(outcome.status, Status::Passed, "{:?}", outcome.message);
+        assert_eq!(outcome.output, ["setup", "body kim", "teardown"]);
+    }
+
+    #[test]
+    fn on_teardown_callbacks_run_last_registered_first() {
+        let body = script(
+            "on_teardown_order.snag",
+            r#"
+on_teardown(|| print("one"));
+on_teardown(|| print("two"));
+print("body");
+"#,
+        );
+        let outcome = run_one(with_script("t0", body));
+
+        assert_eq!(outcome.status, Status::Passed, "{:?}", outcome.message);
+        assert_eq!(outcome.output, ["body", "two", "one"]);
+    }
+
+    #[test]
+    fn a_setup_script_can_register_its_own_cleanup() {
+        let setup = script(
+            "setup_registers.snag",
+            r#"let resource = "res-42"; on_teardown(|| print("deleting " + resource));"#,
+        );
+        let body = script("setup_registers_body.snag", r#"print("body");"#);
+
+        let test = Test {
+            setup: vec![hook(setup, true)],
+            ..with_script("t0", body)
+        };
+        let outcome = run_one(test);
+
+        assert_eq!(outcome.status, Status::Passed, "{:?}", outcome.message);
+        assert_eq!(outcome.output, ["body", "deleting res-42"]);
+    }
+
+    #[test]
+    fn on_teardown_can_opt_out_of_running_after_a_failure() {
+        let body = script(
+            "on_teardown_opt_out.snag",
+            r#"
+on_teardown(|| print("always"));
+on_teardown(|| print("only on success"), false);
+throw "boom";
+"#,
+        );
+        let outcome = run_one(with_script("t0", body));
+
+        assert_eq!(outcome.status, Status::Failed);
+        assert_eq!(outcome.output, ["always"]);
+    }
+
+    #[test]
+    fn teardown_still_runs_after_the_test_times_out() {
+        let cleanup = script("teardown_after_timeout.snag", r#"print("cleaned up");"#);
+        let body = script(
+            "timeout_with_teardown.snag",
+            "let i = 0; while true { i += 1; }",
+        );
+
+        let test = Test {
+            teardown: vec![hook(cleanup, true)],
+            ..with_script("t0", body)
+        };
+
+        let mut args = args();
+        args.timeout = Some(Duration::from_millis(50));
+        let (result, _, recorder) = batch(&[test], &args, 1, &AtomicBool::new(false));
+        result.unwrap();
+        let outcome = &recorder.finished[0];
+
+        assert_eq!(outcome.status, Status::TimedOut);
+        assert_eq!(outcome.output, ["cleaned up"]);
     }
 
     #[test]

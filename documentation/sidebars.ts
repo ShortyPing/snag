@@ -22,6 +22,7 @@ const sidebars: SidebarsConfig = {
       items: [
         'guides/suite-files',
         'guides/writing-scripts',
+        'guides/setup-and-teardown',
         'guides/variables-and-secrets',
         'guides/selecting-tests',
         'guides/execution-model',

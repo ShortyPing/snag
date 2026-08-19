@@ -17,8 +17,56 @@ pub struct Manifest {
     #[serde(default, with = "humantime_serde")]
     pub timeout: Option<Duration>,
 
+    #[serde(default)]
+    pub setup: Option<HookSpec>,
+
+    #[serde(default)]
+    pub teardown: Option<HookSpec>,
+
     #[serde(default, rename = "test")]
     pub tests: Vec<TestDefinition>,
+}
+
+// Setup/teardown as written in the TOML: one script, or a list of them, each
+// either a bare path or a table with options.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(untagged)]
+pub enum HookSpec {
+    One(HookEntry),
+    Many(Vec<HookEntry>),
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(untagged)]
+pub enum HookEntry {
+    Path(PathBuf),
+    Table(HookTable),
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct HookTable {
+    pub file: PathBuf,
+
+    // Teardown only: run the script even when the test itself failed.
+    pub always: Option<bool>,
+}
+
+impl HookSpec {
+    fn entries(&self) -> &[HookEntry] {
+        match self {
+            HookSpec::One(entry) => std::slice::from_ref(entry),
+            HookSpec::Many(entries) => entries,
+        }
+    }
+}
+
+// A hook with its path resolved, ready for the runner.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Hook {
+    pub script: PathBuf,
+    // Teardown: run even after a failed test. Always true for setup.
+    pub always: bool,
 }
 
 fn default_title() -> String {
@@ -44,6 +92,12 @@ pub struct TestDefinition {
 
     #[serde(default)]
     pub variables: BTreeMap<String, String>,
+
+    #[serde(default)]
+    pub setup: Option<HookSpec>,
+
+    #[serde(default)]
+    pub teardown: Option<HookSpec>,
 }
 
 // A TestDefinition with its paths resolved and variables merged, so the runner
@@ -57,6 +111,9 @@ pub struct Test {
     pub parallel_safe: bool,
     pub script: PathBuf,
     pub vars: BTreeMap<String, String>,
+    // Suite hooks first, then the test's own; teardown runs in reverse.
+    pub setup: Vec<Hook>,
+    pub teardown: Vec<Hook>,
     pub suite_title: String,
     pub suite_path: PathBuf,
 }
@@ -76,6 +133,9 @@ pub fn load_suite(path: &Path) -> anyhow::Result<Vec<Test>> {
 
     let base = path.parent().unwrap_or_else(|| Path::new("."));
 
+    let suite_setup = resolve_hooks(manifest.setup.as_ref(), base, Phase::Setup, path)?;
+    let suite_teardown = resolve_hooks(manifest.teardown.as_ref(), base, Phase::Teardown, path)?;
+
     let mut seen: BTreeMap<&str, ()> = BTreeMap::new();
     let mut tests = Vec::with_capacity(manifest.tests.len());
 
@@ -87,6 +147,14 @@ pub fn load_suite(path: &Path) -> anyhow::Result<Vec<Test>> {
         let mut vars = manifest.variables.clone();
         vars.extend(def.variables.clone());
 
+        // Suite setup wraps the test's own: outermost first on the way in,
+        // and the runner unwinds teardown in reverse.
+        let mut setup = suite_setup.clone();
+        setup.extend(resolve_hooks(def.setup.as_ref(), base, Phase::Setup, path)?);
+
+        let mut teardown = resolve_hooks(def.teardown.as_ref(), base, Phase::Teardown, path)?;
+        teardown.extend(suite_teardown.clone());
+
         tests.push(Test {
             id: def.id.clone(),
             name: def.name.clone().unwrap_or_else(|| def.id.clone()),
@@ -95,12 +163,55 @@ pub fn load_suite(path: &Path) -> anyhow::Result<Vec<Test>> {
             parallel_safe: def.parallel_safe.unwrap_or(true),
             script: normalize(&base.join(&def.file)),
             vars,
+            setup,
+            teardown,
             suite_title: manifest.title.clone(),
             suite_path: path.to_path_buf(),
         });
     }
 
     Ok(tests)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Phase {
+    Setup,
+    Teardown,
+}
+
+fn resolve_hooks(
+    spec: Option<&HookSpec>,
+    base: &Path,
+    phase: Phase,
+    suite: &Path,
+) -> anyhow::Result<Vec<Hook>> {
+    let Some(spec) = spec else {
+        return Ok(Vec::new());
+    };
+
+    spec.entries()
+        .iter()
+        .map(|entry| {
+            let (file, always) = match entry {
+                HookEntry::Path(file) => (file, None),
+                HookEntry::Table(table) => (&table.file, table.always),
+            };
+
+            // `always` only means something for teardown; silently ignoring it
+            // on setup would look like it did something.
+            if always.is_some() && phase == Phase::Setup {
+                anyhow::bail!(
+                    "`always` is only valid on teardown, not setup ({})",
+                    suite.display()
+                );
+            }
+
+            Ok(Hook {
+                script: normalize(&base.join(file)),
+                always: always.unwrap_or(true),
+            })
+        })
+        .collect()
 }
 
 // Drop `.` components so paths print as `tests/api.snag`, not `./tests/./api.snag`.
@@ -195,6 +306,95 @@ file = "./scripts/t.snag"
         );
         assert_eq!(normalize(Path::new("./")), PathBuf::from("."));
         assert_eq!(normalize(Path::new("a/../b")), PathBuf::from("a/../b"));
+    }
+
+    #[test]
+    fn suite_hooks_wrap_test_hooks() {
+        let path = write_temp(
+            "hooks.toml",
+            r#"
+setup = "./suite_setup.snag"
+teardown = "./suite_teardown.snag"
+
+[[test]]
+id = "t"
+file = "t.snag"
+setup = ["./a.snag", "./b.snag"]
+teardown = { file = "./t_teardown.snag", always = false }
+"#,
+        );
+        let tests = load_suite(&path).unwrap();
+        let setup: Vec<_> = tests[0]
+            .setup
+            .iter()
+            .map(|h| h.script.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(setup, ["suite_setup.snag", "a.snag", "b.snag"]);
+
+        // Teardown unwinds inward-out: the test's own first, the suite's last.
+        let teardown: Vec<_> = tests[0]
+            .teardown
+            .iter()
+            .map(|h| {
+                (
+                    h.script.file_name().unwrap().to_string_lossy().into_owned(),
+                    h.always,
+                )
+            })
+            .collect();
+        assert_eq!(
+            teardown,
+            [
+                ("t_teardown.snag".to_string(), false),
+                ("suite_teardown.snag".to_string(), true),
+            ]
+        );
+    }
+
+    #[test]
+    fn hooks_default_to_always_and_are_manifest_relative() {
+        let path = write_temp(
+            "hooks_default.toml",
+            r#"
+[[test]]
+id = "t"
+file = "t.snag"
+teardown = "./scripts/clean.snag"
+"#,
+        );
+        let tests = load_suite(&path).unwrap();
+        assert!(tests[0].teardown[0].always);
+        assert!(tests[0].teardown[0].script.ends_with("scripts/clean.snag"));
+    }
+
+    #[test]
+    fn always_on_setup_is_rejected() {
+        let path = write_temp(
+            "hooks_bad.toml",
+            r#"
+[[test]]
+id = "t"
+file = "t.snag"
+setup = { file = "./s.snag", always = false }
+"#,
+        );
+        let err = load_suite(&path).unwrap_err().to_string();
+        assert!(err.contains("only valid on teardown"), "{err}");
+    }
+
+    #[test]
+    fn tests_without_hooks_have_none() {
+        let path = write_temp(
+            "hooks_absent.toml",
+            r#"
+[[test]]
+id = "t"
+file = "t.snag"
+"#,
+        );
+        let tests = load_suite(&path).unwrap();
+        assert!(tests[0].setup.is_empty());
+        assert!(tests[0].teardown.is_empty());
     }
 
     #[test]

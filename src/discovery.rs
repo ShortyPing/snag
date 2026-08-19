@@ -185,6 +185,8 @@ mod tests {
             parallel_safe: true,
             script: PathBuf::from("t.snag"),
             vars: BTreeMap::new(),
+            setup: vec![],
+            teardown: vec![],
             suite_title: "s".into(),
             suite_path: PathBuf::from("suite.toml"),
         }

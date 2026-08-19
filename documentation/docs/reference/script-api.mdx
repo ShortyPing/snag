@@ -23,6 +23,7 @@ tests.
 | [Environment](#environment) | `env` `env_or` |
 | [Output](#output) | `print` `debug` `print_response` |
 | [Timing](#timing) | `sleep_ms` |
+| [Lifecycle](#lifecycle) | `fn setup` `fn teardown` · `on_teardown(cb)` `on_teardown(cb, always)` |
 
 ## Requests
 
@@ -333,6 +334,66 @@ sleep_ms(500);
 With `-j 1` this stalls the entire run; with the default pool it stalls one
 worker. Always pair polling loops with a bounded iteration count.
 
+## Lifecycle
+
+Hooks that run around the script's top-level body. Manifest-declared `setup` and
+`teardown` scripts wrap these — see
+[Setup and teardown](../guides/setup-and-teardown.mdx).
+
+### `fn setup()`
+
+If the script defines a zero-argument `setup`, Snag calls it before the body.
+Variables it declares stay in scope for the body:
+
+```js
+fn setup() {
+    let res = post(`${base_url}/carts`).send();
+    assert_status(res, 201);
+    let cart_id = field(res.json(), "id");
+}
+
+let res = get(`${base_url}/carts/${cart_id}`).send();
+assert_ok(res);
+```
+
+A throw in `setup` fails the test as `setup: <error>` and the body does not run.
+
+### `fn teardown()`
+
+Called after the body, whether the test passed, failed, or timed out.
+
+```js
+fn teardown() {
+    delete(`${base_url}/carts/${cart_id}`).send();
+}
+```
+
+### `on_teardown(callback)` · `on_teardown(callback, always)`
+
+Registers cleanup from inside the script, closing over the variables it needs.
+Callbacks run **last registered first**, before `fn teardown()`.
+
+```js
+let res = post(`${base_url}/users`).json(#{ name: "temp" }).send();
+let user_id = field(res.json(), "id");
+on_teardown(|| delete(`${base_url}/users/${user_id}`).send());
+```
+
+`always` defaults to `true`. Pass `false` to skip the callback when the test
+failed:
+
+```js
+on_teardown(|| print("only after a green run"), false);
+```
+
+Callbacks registered by a manifest `setup` script work the same way — that is
+how a shared fixture script cleans up after itself.
+
+Teardown gets a fresh timeout budget, so cleanup still runs after a test times
+out. If teardown throws while the test itself passed, the test fails with
+`teardown: <error>`; if the test had already failed, its own error is kept and
+the cleanup error is added to the captured output.
+
 ## Rhai essentials
 
 The parts of the base language tests actually use:
@@ -389,4 +450,5 @@ into a `let` first if you need a mutable version.
 Rhai is used with its standard package, and Snag adds only the functions above.
 There is no filesystem access, no process spawning, no socket API beyond the
 HTTP builders, no cookie jar, no WebSocket support, and no shared state between
-tests.
+tests. Setup and teardown scripts share a scope with the test that pulled them
+in, but nothing crosses from one test to another.

@@ -64,8 +64,11 @@ Schema and resolution.
 
 | Item | Notes |
 | --- | --- |
-| `Manifest` | `title`, `variables`, `timeout`, `tests` (renamed from `test`). `deny_unknown_fields` |
-| `TestDefinition` | `id`, `name`, `parallel_safe`, `tags`, `timeout`, `file`, `variables`. `deny_unknown_fields` |
+| `Manifest` | `title`, `variables`, `timeout`, `setup`, `teardown`, `tests` (renamed from `test`). `deny_unknown_fields` |
+| `TestDefinition` | `id`, `name`, `parallel_safe`, `tags`, `timeout`, `file`, `variables`, `setup`, `teardown`. `deny_unknown_fields` |
+| `HookSpec` / `HookEntry` / `HookTable` | Untagged: a path, a `{ file, always }` table, or a list of either |
+| `Hook` | Resolved hook — `script` plus `always` |
+| `resolve_hooks()` | Joins hook paths to the manifest directory; rejects `always` on setup |
 | `Test` | The resolved form the rest of the crate uses |
 | `Test::qualified_id()` | `format!("{}::{}", suite_path.display(), id)` |
 | `load_suite()` | Read → parse → resolve, rejecting duplicate ids |
@@ -93,11 +96,21 @@ Execution.
 | `Event` | `Started(Test)` / `Finished(Box<Outcome>)` |
 | `execute_batch()` | The worker pool and the event loop |
 | `execute()` | Retry wrapper; owns `attempts` and the total duration |
-| `execute_once()` | One attempt: read, build client and engine, run, classify |
+| `execute_once()` | One attempt: build client and engine, compile, run setup/body/teardown, classify |
+| `compile_hooks()` / `compile_file()` | Compile hook and test scripts before anything runs |
+| `run_test_body()` | Setup scripts → `fn setup()` → the script, all sharing one `Scope` |
+| `run_teardown()` | `on_teardown` callbacks last-first → `fn teardown()` → teardown scripts |
+| `call_hook_fn()` | `eval_ast(false)`, `rewind_scope(false)` so `fn setup()` leaves its variables behind |
+| `defines()` | Whether an AST declares a zero-argument function by that name |
 | `Failure` | `TimedOut` or `Error(String)` |
 | `classify()` | Distinguishes a timeout from a genuine script failure |
+| `phase_failure()` | Same classification, prefixed with the phase and script |
 | `shuffle()` | Fisher-Yates over a seeded xorshift64 — deterministic, no rng dependency |
 | `PROGRESS_INTERVAL` | `2_000` operations between deadline checks |
+
+The deadline behind `on_progress` lives in a shared cell so the teardown phase
+can be handed a fresh budget — cleanup after a timed-out test would otherwise
+abort on its first operation.
 
 `build_reporter()` is where `--format human --report FILE` becomes JSON in the
 file: a human report in a file would be useless to a tool.
@@ -143,6 +156,8 @@ The script-visible surface.
 | `register_debug()` | `on_print`, `on_debug`, `print_response` |
 | `register_assertions()` | Every `assert_*`; `eq_result()` builds the message |
 | `register_env()` | `env`, `env_or`, `sleep_ms`, `fail` |
+| `register_teardown()` | Both `on_teardown` overloads, pushing onto the queue |
+| `TeardownCallback` / `TeardownQueue` | `Rc<RefCell<Vec<_>>>` — a `FnPtr` belongs to its engine's thread |
 | `dig()` | Backs `field()`; walks maps and arrays by dotted path |
 | `json_to_dynamic()` / `dynamic_to_json_string()` | serde bridges for `res.json()` and `.json(value)` |
 | `truncate()` | Caps bodies in messages at 500 chars, appending the byte total |

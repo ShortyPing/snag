@@ -1,0 +1,157 @@
+---
+id: setup-and-teardown
+title: Setup and teardown
+sidebar_position: 3
+description: Shared setup and teardown scripts declared in the manifest, lifecycle functions inside a script, and cleanup that still runs when a test fails.
+---
+
+# Setup and teardown
+
+Most tests need something to exist before they run — a token, a fixture, a
+seeded record — and need it gone afterwards. Snag gives you three places to put
+that work, and they compose:
+
+| Where | Good for |
+| --- | --- |
+| [Manifest hooks](#manifest-hooks) | Shared scripts several tests reuse: log in, seed, reset |
+| [`fn setup` / `fn teardown`](#lifecycle-functions) | Work that belongs to one script and nothing else |
+| [`on_teardown(...)`](#on_teardown) | Cleaning up a resource the moment you create it |
+
+All of it runs inside the test's own timeout and its own engine, so nothing
+leaks between tests.
+
+## Manifest hooks
+
+`setup` and `teardown` take a script path, and can be written on the suite (runs
+for every test) or on a single `[[test]]`:
+
+```toml title="suite.toml"
+title = "Checkout API"
+setup = "./shared/login.snag"
+teardown = "./shared/reset.snag"
+
+[[test]]
+id = "cart-create"
+file = "./cart_create.snag"
+setup = "./seed_catalogue.snag"
+```
+
+Paths resolve against the manifest's directory, exactly like `file`.
+
+A hook can also be a list, when order matters:
+
+```toml
+setup = ["./login.snag", "./seed_catalogue.snag"]
+```
+
+### Ordering
+
+Suite hooks wrap test hooks. Setup runs outside-in, teardown unwinds inside-out:
+
+```
+suite setup  →  test setup  →  fn setup  →  the test  →
+    on_teardown callbacks (last registered first)  →  fn teardown  →
+    test teardown  →  suite teardown
+```
+
+### Sharing state
+
+Every hook and the test itself share **one scope**, so a variable declared at the
+top level of a setup script is a variable the test can read:
+
+```js title="shared/login.snag"
+let res = post(`${base_url}/login`).json(#{ user: "kim", password: env("PW") }).send();
+assert_ok(res);
+let token = field(res.json(), "access_token");
+```
+
+```js title="cart_create.snag"
+let res = post(`${base_url}/carts`).bearer(token).send();
+assert_status(res, 201);
+```
+
+Manifest variables are constants in that same scope, so hooks can read
+`base_url` too.
+
+### Teardown after a failure
+
+By default teardown runs whatever happened — that is the point of cleanup. Write
+it as a table to opt out:
+
+```toml
+[[test]]
+id = "cart-create"
+file = "./cart_create.snag"
+teardown = { file = "./assert_ledger_empty.snag", always = false }
+```
+
+`always = false` means *skip this when the test failed* — useful when the
+teardown script is really a post-condition check, or when leaving the mess
+behind is what you want to debug with. `always` is teardown-only; putting it on
+`setup` is a manifest error.
+
+## Lifecycle functions
+
+A script can carry its own hooks. Define `fn setup()` or `fn teardown()` and
+Snag calls them around the top-level body:
+
+```js title="cart_create.snag"
+fn setup() {
+    let cart = post(`${base_url}/carts`).bearer(token).send();
+    assert_status(cart, 201);
+    // Variables declared here stay visible to the body below.
+    let cart_id = field(cart.json(), "id");
+}
+
+fn teardown() {
+    delete(`${base_url}/carts/${cart_id}`).bearer(token).send();
+}
+
+let res = get(`${base_url}/carts/${cart_id}`).bearer(token).send();
+assert_ok(res);
+```
+
+`fn teardown()` always runs, including after a failure or a timeout.
+
+## `on_teardown`
+
+Register cleanup at the point you create the thing, instead of remembering to do
+it at the bottom:
+
+```js
+let user = post(`${base_url}/users`).json(#{ name: "temp" }).send();
+let user_id = field(user.json(), "id");
+on_teardown(|| delete(`${base_url}/users/${user_id}`).send());
+```
+
+Callbacks run in reverse registration order — last created, first destroyed —
+and they capture the variables they use, so this works from a shared setup
+script too:
+
+```js title="shared/seed.snag"
+let fixture = post(`${base_url}/fixtures`).send();
+let fixture_id = field(fixture.json(), "id");
+on_teardown(|| delete(`${base_url}/fixtures/${fixture_id}`).send());
+```
+
+Pass `false` as a second argument to skip the callback when the test failed:
+
+```js
+on_teardown(|| print("only after a green run"), false);
+```
+
+## Failures and timeouts
+
+| What happened | Result |
+| --- | --- |
+| A setup hook throws | The test **fails** with `setup <script>: <error>`; the body never runs; teardown still runs |
+| The test throws | The test fails with its own error, teardown still runs |
+| A teardown hook throws, test passed | The test **fails** with `teardown <script>: <error>` |
+| A teardown hook throws, test already failed | The original failure is kept; the cleanup error is added to the captured output |
+| The test times out | Status is `timed_out`, and teardown gets a **fresh** timeout budget so cleanup still happens |
+
+Retries re-run the whole thing — setup, test, teardown — so a retried test
+starts from a clean slate.
+
+`snag check` compiles hook scripts along with the test script, so a typo in a
+shared setup file is caught before anything runs.

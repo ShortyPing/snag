@@ -287,6 +287,21 @@ your consumers depend on.
 service that has fallen over; `assert_faster_than(res, 50)` catches your CI
 runner having a bad morning.
 
+## Setup and teardown
+
+Work that has to happen before or after the body — logging in, seeding a
+fixture, deleting what the test created — belongs in a hook rather than at the
+top and bottom of every script:
+
+```js
+let res = post(`${base_url}/users`).json(#{ name: "temp" }).send();
+let user_id = field(res.json(), "id");
+on_teardown(|| delete(`${base_url}/users/${user_id}`).send());
+```
+
+Shared steps move into their own script and get wired up in the manifest with
+`setup` / `teardown`. See [Setup and teardown](./setup-and-teardown.mdx).
+
 ## Next
 
 - [Script API reference](../reference/script-api.mdx) — every function, with signatures

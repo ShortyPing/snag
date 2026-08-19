@@ -1,7 +1,7 @@
 ---
 id: execution-model
 title: Execution model
-sidebar_position: 5
+sidebar_position: 6
 description: Phases, worker pools, timeouts, retries, fail-fast, and deterministic shuffling — what happens between selection and the report.
 ---
 
@@ -223,19 +223,26 @@ required CI check: the *failure* makes it red, not the skips.
 1. Take the next index from the shared counter. Stop when the list is exhausted.
 2. If the cancel flag is set, emit a skipped outcome and continue.
 3. Emit `Started`.
-4. Read the script from disk. A missing file fails the test — it is not a run
-   error.
-5. Build an HTTP client (with the timeout, if any) and a fresh Rhai engine, and
-   register the HTTP, assertion, debug, and env functions.
+4. Build an HTTP client (with the timeout, if any) and a fresh Rhai engine, and
+   register the HTTP, assertion, debug, env, and teardown functions.
+5. Compile the setup scripts, the teardown scripts, and the test script. A
+   missing or uncompilable file fails the test — it is not a run error.
 6. Push the test's variables into the scope as constants.
-7. Run the script, capturing `print`/`debug` into a per-test buffer.
+7. Run the setup scripts, then a `fn setup()` if the script defines one, then
+   the script itself, capturing `print`/`debug` into a per-test buffer. All of
+   it shares one scope.
 8. Classify the result: ok, timed out, or failed with a message.
-9. Retry from step 4 if the test failed and attempts remain.
-10. Emit `Finished` with the outcome.
+9. Run teardown — `on_teardown` callbacks last-first, then `fn teardown()`, then
+   the teardown scripts — with a fresh timeout budget, skipping any hook marked
+   `always = false` when the test failed.
+10. Retry from step 4 if the test failed and attempts remain.
+11. Emit `Finished` with the outcome.
 
 Events go over a channel to the main thread, which is the only thread that
 touches the reporter. That is why output never interleaves, and why a custom
 reporter does not need to be thread-safe.
+
+See [Setup and teardown](./setup-and-teardown.mdx) for how the hooks compose.
 
 ## Next
 

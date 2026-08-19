@@ -1,9 +1,11 @@
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
 use base64::Engine as Base64Engine;
 use base64::prelude::BASE64_STANDARD;
 use rhai::serde::{from_dynamic, to_dynamic};
-use rhai::{Dynamic, Engine, EvalAltResult, Map};
+use rhai::{Dynamic, Engine, EvalAltResult, FnPtr, Map};
+use std::cell::RefCell;
+use std::rc::Rc;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 // Per-test capture buffer, so parallel output doesn't interleave.
 pub type OutputSink = Arc<Mutex<Vec<String>>>;
@@ -16,6 +18,36 @@ fn push(sink: &OutputSink, line: impl Into<String>) {
     if let Ok(mut guard) = sink.lock() {
         guard.push(line.into());
     }
+}
+
+// Cleanup registered from inside a script with on_teardown(...).
+#[derive(Clone)]
+pub struct TeardownCallback {
+    pub func: FnPtr,
+    // Run even when the test itself failed.
+    pub always: bool,
+}
+
+// Callbacks land here in registration order; the runner unwinds them last-first.
+// Rc, not Arc: a FnPtr belongs to the engine that made it, and an engine never
+// leaves the worker thread that built it.
+pub type TeardownQueue = Rc<RefCell<Vec<TeardownCallback>>>;
+
+pub fn new_teardown_queue() -> TeardownQueue {
+    Rc::new(RefCell::new(Vec::new()))
+}
+
+// on_teardown(|| ...) registers cleanup that runs after the test, pass or fail.
+// on_teardown(|| ..., false) skips it when the test failed.
+pub fn register_teardown(engine: &mut Engine, queue: TeardownQueue) {
+    let q = queue.clone();
+    engine.register_fn("on_teardown", move |func: FnPtr| {
+        q.borrow_mut().push(TeardownCallback { func, always: true });
+    });
+
+    engine.register_fn("on_teardown", move |func: FnPtr, always: bool| {
+        queue.borrow_mut().push(TeardownCallback { func, always });
+    });
 }
 
 #[derive(Clone)]
@@ -116,13 +148,16 @@ pub fn register_http(engine: &mut Engine, client: reqwest::blocking::Client) {
     engine.register_get("text", |r: &mut Response| r.text.clone());
     engine.register_get("duration_ms", |r: &mut Response| r.duration_ms as i64);
     engine.register_fn("json", |r: &mut Response| json_to_dynamic(&r.text));
-    engine.register_fn("basic", |username: String, password: String| -> Result<String, Box<EvalAltResult>> {
-        let str = format!("{}:{}", username, password);
-        let bytes = str.as_bytes();
-        let encoded = BASE64_STANDARD.encode(bytes);
+    engine.register_fn(
+        "basic",
+        |username: String, password: String| -> Result<String, Box<EvalAltResult>> {
+            let str = format!("{}:{}", username, password);
+            let bytes = str.as_bytes();
+            let encoded = BASE64_STANDARD.encode(bytes);
 
-        Ok(format!("Basic {}", encoded))
-    });
+            Ok(format!("Basic {}", encoded))
+        },
+    );
     engine.register_fn("header", |r: &mut Response, name: &str| {
         let wanted = name.to_ascii_lowercase();
         r.headers
