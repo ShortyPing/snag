@@ -82,6 +82,13 @@ Then, if the change touches behaviour, exercise it against the demo suite and
 paste the output into the pull request. A before/after transcript is the most
 useful thing a reviewer can be given.
 
+GitHub Actions runs the same three commands on every branch and pull request
+(`.github/workflows/ci.yml`), with clippy as `-- -D warnings`, so a warning
+fails the job. A push to `main` runs them once more and then
+builds release binaries for Linux, macOS, and Windows
+(`.github/workflows/build.yml`), attaching each as a workflow artifact named
+`snag-<target>`.
+
 ## Commit messages
 
 History is short and imperative, lowercase:

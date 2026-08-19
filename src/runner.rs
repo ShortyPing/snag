@@ -154,7 +154,7 @@ fn jobs(requested: usize) -> usize {
 }
 
 enum Event {
-    Started(Test),
+    Started(Box<Test>),
     Finished(Box<Outcome>),
 }
 
@@ -201,7 +201,7 @@ fn execute_batch(
                         continue;
                     }
 
-                    let _ = tx.send(Event::Started(test.clone()));
+                    let _ = tx.send(Event::Started(Box::new(test.clone())));
                     let outcome = execute(test, args);
                     if outcome.status.is_failure() && args.fail_fast {
                         cancel.store(true, Ordering::SeqCst);

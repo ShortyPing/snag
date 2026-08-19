@@ -193,4 +193,6 @@ cargo test
 ```
 
 All three are expected to be clean. `cargo clippy --all-targets` includes test
-code, which is where lints usually appear first.
+code, which is where lints usually appear first — CI runs it as
+`cargo clippy --all-targets -- -D warnings`, so a warning left behind fails the
+build.
