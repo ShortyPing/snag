@@ -20,6 +20,10 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// The commit this binary was compiled from, baked in by `build.rs`.
 pub const COMMIT: &str = env!("SNAG_GIT_COMMIT");
 
+/// The target triple this binary was compiled for, baked in by `build.rs`.
+/// Matches a key in `platforms`.
+pub const TARGET: &str = env!("SNAG_TARGET");
+
 /// The build number a repository with no previous release starts at.
 pub const FIRST_BUILD: u64 = 1;
 
@@ -102,13 +106,19 @@ impl Revision {
     }
 }
 
-/// Where the previous revision lives when `--previous` is not given: the asset
-/// on the newest release, which GitHub resolves without knowing its tag.
-pub fn default_previous_url(repo: &str) -> String {
+/// The newest release's manifest, which GitHub resolves without knowing its
+/// tag — the assets carry no version in their names.
+pub fn latest_url(repo: &str) -> String {
     format!("https://github.com/{repo}/releases/latest/download/revision.json")
 }
 
-fn load_previous(source: &str) -> anyhow::Result<Revision> {
+/// One specific release's manifest.
+pub fn tag_url(repo: &str, tag: &str) -> String {
+    format!("https://github.com/{repo}/releases/download/{tag}/revision.json")
+}
+
+/// Read a manifest from a file path or an `http(s)` URL.
+pub fn load(source: &str) -> anyhow::Result<Revision> {
     let body = if source.starts_with("https://") || source.starts_with("http://") {
         reqwest::blocking::Client::builder()
             .timeout(LOOKUP_TIMEOUT)
@@ -143,9 +153,9 @@ fn resolve_build(args: &RevisionArgs) -> u64 {
     let source = args
         .previous
         .clone()
-        .unwrap_or_else(|| default_previous_url(&args.repo));
+        .unwrap_or_else(|| latest_url(&args.repo));
 
-    match load_previous(&source) {
+    match load(&source) {
         Ok(previous) => next_build(&previous),
         Err(err) => {
             eprintln!("warning: no previous revision at {source} ({err:#})");
@@ -331,20 +341,20 @@ mod tests {
     }
 
     #[test]
-    fn load_previous_reads_a_local_file() {
+    fn load_reads_a_local_file() {
         let mut json = serde_json::to_string(&sample()).unwrap();
         json.push('\n');
         let path = write("previous-ok.json", &json);
 
-        let loaded = load_previous(path.to_str().unwrap()).expect("load");
+        let loaded = load(path.to_str().unwrap()).expect("load");
         assert_eq!(loaded.build, 7, "got {}", loaded.build);
         assert_eq!(next_build(&loaded), 8);
     }
 
     #[test]
-    fn load_previous_says_which_file_it_could_not_parse() {
+    fn load_says_which_file_it_could_not_parse() {
         let path = write("previous-garbage.json", "not json at all");
-        let err = load_previous(path.to_str().unwrap()).expect_err("should fail");
+        let err = load(path.to_str().unwrap()).expect_err("should fail");
         let msg = format!("{err:#}");
         assert!(
             msg.contains("parsing") && msg.contains("previous-garbage.json"),
@@ -353,12 +363,12 @@ mod tests {
     }
 
     #[test]
-    fn load_previous_says_which_file_is_missing() {
+    fn load_says_which_file_is_missing() {
         let path = write("previous-present.json", "{}")
             .parent()
             .unwrap()
             .join("previous-absent.json");
-        let err = load_previous(path.to_str().unwrap()).expect_err("should fail");
+        let err = load(path.to_str().unwrap()).expect_err("should fail");
         let msg = format!("{err:#}");
         assert!(
             msg.contains("reading") && msg.contains("previous-absent.json"),
@@ -369,8 +379,25 @@ mod tests {
     // The URL has to be resolvable without knowing the previous tag, or the
     // lookup could not run before the tag it is generating for exists.
     #[test]
+    fn the_running_target_is_a_known_platform() {
+        assert!(
+            TARGETS.iter().any(|(t, ..)| *t == TARGET) || TARGET == "unknown",
+            "the build target {TARGET} is not in TARGETS, so `snag update` \
+             could not find its own asset"
+        );
+    }
+
+    #[test]
+    fn a_tag_url_names_that_release() {
+        assert_eq!(
+            tag_url("ShortyPing/snag", "v0.1.0"),
+            "https://github.com/ShortyPing/snag/releases/download/v0.1.0/revision.json"
+        );
+    }
+
+    #[test]
     fn the_default_lookup_url_is_version_free() {
-        let url = default_previous_url("ShortyPing/snag");
+        let url = latest_url("ShortyPing/snag");
         assert_eq!(
             url,
             "https://github.com/ShortyPing/snag/releases/latest/download/revision.json"

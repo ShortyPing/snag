@@ -28,6 +28,7 @@ const sidebars: SidebarsConfig = {
         'guides/execution-model',
         'guides/reporters',
         'guides/ci-integration',
+        'guides/updating',
         'guides/troubleshooting',
       ],
     },

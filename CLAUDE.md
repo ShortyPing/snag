@@ -28,6 +28,8 @@ Smoke test after behaviour changes (`demo/` is the runnable example suite):
 ./target/debug/snag list --long demo/suite.toml
 ./target/debug/snag check -v demo/suite.toml
 ./target/debug/snag demo/suite.toml -t fast -f json   # also junit, teamcity
+./target/debug/snag revision --offline -o -           # release manifest, no network
+./target/debug/snag update --check                    # network
 ```
 
 Docs site (Docusaurus, Node 20+ / pnpm) lives in `documentation/`:
@@ -42,11 +44,13 @@ pnpm typecheck
 
 Pipeline: **discovery → manifest → runner → report**, with `scripting_registration` supplying the Rhai script API.
 
-- `main.rs` — clap CLI (`run`, `list`, `check`, `init`, `completions`) plus `Ctx` (format/color/verbose/quiet) and `Exit` (0 green, 1 tests failed, 2 could not run). `implicit_run()` rewrites `snag ./suite.toml` into `snag run ./suite.toml` by hand, because clap will not take a variadic positional alongside subcommands — adding a flag that takes a value means adding it to that fn's `TAKES_VALUE` list too.
+- `main.rs` — clap CLI (`run`, `list`, `check`, `init`, `revision`, `update`, `completions`) plus `Ctx` (format/color/verbose/quiet) and `Exit` (0 green, 1 tests failed, 2 could not run). `implicit_run()` rewrites `snag ./suite.toml` into `snag run ./suite.toml` by hand, because clap will not take a variadic positional alongside subcommands — adding a flag that takes a value means adding it to that fn's `TAKES_VALUE` list too.
 - `discovery.rs` — the single entry point `discover()` that `run`/`list`/`check` all share, so all three see the same set. Expands paths/globs/dir walks into suite files (`suite.toml`, `snag.toml`, `*.snag.toml`; a file named explicitly on the CLI bypasses the naming convention), then applies the `Filter` (`--filter`/`--exclude` match name *or* id; `--tag` is OR-ed; `--regex` switches matcher kind).
 - `manifest.rs` — TOML deserialization (`Manifest`/`TestDefinition`, `deny_unknown_fields`) flattened into a resolved `Test`: script paths joined to the manifest dir and normalized, variables merged (suite → test), timeouts resolved (test → file, and `--timeout` wins later in the runner), setup/teardown `HookSpec` resolved into `Hook`s. Suite hooks wrap test hooks: setup is suite-first, teardown unwinds test-first then suite. `always` is teardown-only and rejected on setup.
 - `runner.rs` — the whole execution model. `run()` partitions on `parallel_safe`: `false` tests run first in a serial batch, the rest share a worker pool. `execute_batch()` spawns scoped threads pulling from an `AtomicUsize` index and sends `Event`s back over an `mpsc` channel, so **the reporter only ever runs on the main thread** — no locking, and reporters need not be `Sync`. A shared `cancel` flag drains the remainder as `Skipped` (fail-fast, or a reporter error). Each test gets a fresh `Engine`, a fresh `reqwest::blocking::Client`, and a fresh output sink per attempt.
 - `report.rs` — the `Reporter` trait (`run_started`/`test_started`/`test_finished`/`run_finished`, all defaulted). Streaming formats write per event; `Json`/`Junit` buffer and emit in `run_finished`. `Multi` broadcasts to several reporters, which is how `--report FILE` puts human output on the terminal and the machine report in the file (with `--format human`, the file gets JSON instead).
+- `revision.rs` — `snag revision`, which writes the release manifest (`revision.json`): version, an incrementing build number, the commit baked in by `build.rs`, and a download URL per platform. `TARGETS` is the release matrix and must stay in step with the workflow build matrices.
+- `update.rs` — `snag update` and the startup "an update is available" notice. `start_check()` never touches the network on the calling thread: it prints from a cache file and refreshes on a detached thread, and the whole thing is off unless stderr is a TTY.
 - `scripting_registration.rs` — everything scripts can call, grouped into `register_http`, `register_debug`, `register_assertions`, `register_env`, `register_teardown`. Requests are a chainable `ReqBuilder`; `.send()` is the only call that touches the network. `field(value, "a.b.0")` walks decoded JSON via `dig()` and errors on a missing key rather than returning unit.
 
 ### Two invariants worth knowing before touching the runner
@@ -82,5 +86,7 @@ For `execute_batch` tests: use `workers = 1` wherever ordering is asserted. Canc
 | New manifest field | `reference/manifest.mdx` + a `manifest.rs` default test |
 | New output format | `reference/report-formats.mdx`, `guides/reporters.mdx`, an escaping test |
 | Runner behaviour | an `execute_batch` test + `guides/execution-model.mdx` |
+| New release platform | `TARGETS` in `revision.rs` **and** both workflow build matrices |
+| Update or notice behaviour | `guides/updating.mdx` + a test in `update.rs` |
 
 New pages must be added to `documentation/sidebars.ts` or they won't appear. Cross-link with relative paths including the extension (`[CLI](../reference/cli.mdx)`) so `pnpm build` can verify them. Fence languages: `toml` manifests, `js` for `.snag` scripts, `console` for transcripts with a `$` prompt, `bash` for copyable commands. **Command output in the docs is real output** — re-run the binary and paste, never invent it.

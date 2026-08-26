@@ -17,10 +17,11 @@ CLI definition and dispatch. Also the crate root, so it declares the modules.
 | Item | Notes |
 | --- | --- |
 | `Cli` | Top-level clap parser. Global options: `--format`, `--color`, `--verbose`, `--quiet` |
-| `Command` | `Run`, `List`, `Check`, `Init`, `Completions` |
+| `Command` | `Run`, `List`, `Check`, `Init`, `Revision`, `Update`, `Completions` |
 | `SelectionArgs` | Flattened into all three selecting commands: `paths`, `filter`, `tag`, `exclude`, `regex` |
 | `RunArgs` | `SelectionArgs` plus `jobs`, `fail_fast`, `timeout`, `retries`, `seed`, `dry_run`, `report` |
 | `ListArgs`, `CheckArgs`, `InitArgs` | The other commands' arguments |
+| `RevisionArgs`, `UpdateArgs` | Release-manifest and self-update arguments |
 | `Format`, `ColorChoice` | Value enums for `--format` and `--color` |
 | `Exit` | `Ok = 0`, `TestsFailed = 1`, `Error = 2`, with `From<Exit> for ExitCode` |
 | `Ctx` | Presentation settings resolved once: format, color as a bool, verbosity, quiet |
@@ -186,6 +187,36 @@ Builder methods take `ReqBuilder` **by value** and return it, which is what make
 | `glob` + `walkdir` | Path expansion and directory walking |
 | `base64` | `basic()` |
 
+## `src/revision.rs`
+
+Builds the release manifest. See [revision.json](../reference/revision-file.mdx).
+
+| Item | Notes |
+| --- | --- |
+| `VERSION` / `COMMIT` / `TARGET` | Compile-time constants; the last two come from `build.rs` |
+| `TARGETS` | The release matrix. Must stay in step with the workflow build matrix |
+| `Revision` / `Platform` | The serialised shape. `platforms` is a `BTreeMap`, so output is byte-stable |
+| `latest_url()` / `tag_url()` | Manifest URLs. `latest_url` is version-free, so it resolves without knowing the tag |
+| `load()` | Reads a manifest from a file path or an `http(s)` URL |
+| `next_build()` / `resolve_build()` | The build counter, and the `--build` / `--previous` / `--offline` precedence |
+
+## `src/update.rs`
+
+`snag update` and the startup notice. See [updating](../guides/updating.mdx).
+
+| Item | Notes |
+| --- | --- |
+| `parse_version()` / `is_newer()` | Numeric `major.minor.patch` compare. Unparseable never counts as newer |
+| `Cached` | The check cache: `checked_at`, `version`, `tag` |
+| `cache_path()` / `read_cache()` / `write_cache()` | `XDG_CACHE_HOME` or `LOCALAPPDATA`; written via temp file + rename |
+| `is_stale()` | Ages an entry out after `CHECK_TTL`. Saturating, so a backwards clock cannot panic |
+| `roll_with()` / `roll()` | The `NOTICE_CHANCE` sampling, split from the clock so it is testable |
+| `enabled()` | Every gate on the notice: opt-out env, format, quiet, stderr TTY, command |
+| `start_check()` | Prints from cache, then refreshes on a detached thread. Never blocks the run |
+| `verify()` | Runs the download's `--version` and compares. The only integrity check there is |
+| `install()` | Atomic rename on Unix; move-aside-and-restore on Windows |
+| `denied()` | Whether the failure was a permission error, which is the only one that earns the sudo hint |
+
 ## Where to make a change
 
 | Goal | File |
@@ -197,3 +228,5 @@ Builder methods take `ReqBuilder` **by value** and return it, which is what make
 | New assertion | `scripting_registration.rs`, `register_assertions` |
 | New output format | `report.rs` plus the `Format` enum in `main.rs` |
 | Scheduling / retries / timeouts | `runner.rs` |
+| New release platform | `TARGETS` in `revision.rs` **and** the workflow build matrices |
+| Update behaviour or the startup notice | `update.rs` |

@@ -18,13 +18,15 @@ snag [OPTIONS] [COMMAND]
 | [`check`](#snag-check) | Parse manifests and compile scripts, no network |
 | [`init`](#snag-init) | Scaffold a suite plus an example script |
 | [`revision`](#snag-revision) | Write the release manifest for this build |
+| [`update`](#snag-update) | Replace this binary with the latest release |
 | [`completions`](#snag-completions) | Generate a shell completion script |
 
 ## The implicit `run` verb
 
 `snag demo/suite.toml` is rewritten to `snag run demo/suite.toml`. The rule: if
 the first non-flag argument is not one of `run`, `list`, `check`, `init`,
-`revision`, `completions`, or `help`, then `run` is inserted in front of it. Arguments after
+`revision`, `update`, `completions`, or `help`, then `run` is inserted in front
+of it. Arguments after
 a `--` separator are left alone.
 
 ```bash
@@ -277,6 +279,58 @@ moving tag; the URLs follow the tag, the `version` field follows the binary.
 `-q` suppresses the confirmation line. `--format` has no effect here: the output
 is always JSON.
 
+## `snag update`
+
+```
+snag update [OPTIONS]
+```
+
+Downloads the release binary for this platform and replaces the running
+executable with it. See [updating](../guides/updating.mdx) for the full picture.
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `--check` | off | Report whether a newer release exists; install nothing |
+| `--force` | off | Reinstall even when already on the latest version |
+| `--tag <TAG>` | latest release | Install a specific release |
+| `--manifest <SOURCE>` | the release on GitHub | Read the manifest from a path or `http(s)` URL |
+| `--repo <OWNER/NAME>` | `ShortyPing/snag` | Repository to fetch from |
+
+```console
+$ snag update --check
+snag 0.1.0 is up to date
+```
+
+The platform is chosen by the target triple this binary was compiled for, which
+must be a key in the release's [`revision.json`](./revision-file.mdx):
+
+```console
+$ snag update
+Error: release v0.1.0 has no binary for aarch64-apple-darwin (it has: x86_64-unknown-linux-gnu)
+```
+
+Before anything is replaced, the download is run with `--version` and its answer
+compared to the version the manifest promised. A mismatch aborts and leaves the
+installed binary alone:
+
+```console
+$ snag update --force
+Error: expected the download to report version 9.9.9, got "0.1.0"
+```
+
+The manifest carries no checksum, so this is the only integrity check there is;
+the rest rests on TLS to `github.com`.
+
+Installing needs write access to the directory holding the binary, not to the
+binary itself — the file is replaced by rename, not overwritten:
+
+```console
+$ snag update --force
+Error: updating /usr/local/bin/snag needs write access to /usr/local/bin: writing /usr/local/bin/.snag-update-31102: Permission denied (os error 13)
+```
+
+`--tag` and `--manifest` are mutually exclusive, as are `--check` and `--force`.
+
 ## `snag completions`
 
 ```
@@ -310,6 +364,15 @@ Snag reads no configuration from the environment. Scripts read it explicitly
 with `env("NAME")` and `env_or("NAME", "default")`; anything you export before
 invoking `snag` is visible to them.
 
-One variable is read at *build* time, not at run time: `SNAG_GIT_COMMIT` sets
-the commit hash `snag revision` reports. Unset, the build asks `git rev-parse
-HEAD`, and falls back to `unknown` outside a checkout.
+Two exceptions:
+
+| Variable | When | Effect |
+| --- | --- | --- |
+| `SNAG_NO_UPDATE_CHECK` | run time | Any non-empty value disables the update check and its notice |
+| `SNAG_GIT_COMMIT` | build time | Sets the commit hash `snag revision` reports |
+
+Without `SNAG_GIT_COMMIT` the build asks `git rev-parse HEAD`, and falls back to
+`unknown` outside a checkout.
+
+The update check also reads `XDG_CACHE_HOME` (`LOCALAPPDATA` on Windows) to find
+where to cache its result — see [updating](../guides/updating.mdx#the-cache).

@@ -10,7 +10,8 @@ description: The release manifest snag publishes on every tag - schema, URLs, an
 Every tagged release publishes a `revision.json` next to the binaries. It names
 the version, an incrementing build number, the commit it was built from, and the
 download URL for each platform, so an installer or update check can resolve a release without
-scraping the releases page.
+scraping the releases page. [`snag update`](../guides/updating.mdx) is the first
+consumer of it.
 
 Stable URLs:
 

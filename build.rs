@@ -14,6 +14,12 @@ fn main() {
         .unwrap_or_else(|| "unknown".to_string());
 
     println!("cargo:rustc-env=SNAG_GIT_COMMIT={commit}");
+
+    // `snag update` needs the triple it is running as to pick its own asset out
+    // of revision.json. Cargo exposes TARGET to build scripts but not to the
+    // crate, so pass it through.
+    let target = std::env::var("TARGET").unwrap_or_else(|_| "unknown".to_string());
+    println!("cargo:rustc-env=SNAG_TARGET={target}");
 }
 
 fn git_head() -> Option<String> {

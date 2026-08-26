@@ -1,0 +1,149 @@
+---
+id: updating
+title: Updating
+sidebar_position: 10
+description: Self-update with snag update, how the startup notice decides to appear, and how to turn all of it off.
+---
+
+# Updating
+
+```bash
+snag update
+```
+
+Downloads the release binary for this platform from the
+[release manifest](../reference/revision-file.mdx) and replaces the running
+executable with it.
+
+```console
+$ snag update
+updated /usr/local/bin/snag from 0.1.0 to 0.2.0 (v0.2.0)
+```
+
+Nothing else changes: no package manager, no install script, no second copy on
+disk. If snag came from `cargo install`, updating with `cargo install` again
+works too — `snag update` simply overwrites whatever binary is running.
+
+## What it does before overwriting anything
+
+1. Fetch the latest `revision.json`.
+2. Stop if the running version is already the newest, unless `--force`.
+3. Look up this binary's target triple in `platforms`, and fail listing what the
+   release does have if it is missing.
+4. Download the asset **next to the current binary**, so the install is a rename
+   inside one filesystem.
+5. Run the download with `--version` and compare its answer to the version the
+   manifest promised.
+6. Rename it over the current binary.
+
+Step 5 is the only integrity check there is. The manifest carries no checksum —
+one published alongside the binary it describes would add nothing that TLS to
+`github.com` does not already give. What the version check does catch is a
+truncated download, a mis-tagged asset, and a binary for the wrong platform:
+
+```console
+$ snag update --force
+Error: expected the download to report version 9.9.9, got "0.1.0"
+```
+
+Any failure removes the staged file and leaves the installed binary untouched.
+
+## Permissions
+
+A running executable cannot be overwritten, but its directory entry can be
+repointed. So the update needs write access to the **directory**, not the file:
+
+```console
+$ snag update
+Error: updating /usr/local/bin/snag needs write access to /usr/local/bin: writing /usr/local/bin/.snag-update-31102: Permission denied (os error 13)
+```
+
+Re-run it with `sudo`, or install snag somewhere you own (`~/.local/bin`,
+`~/.cargo/bin`).
+
+On Windows the old binary is moved aside as `snag.old` first, because Windows
+refuses to rename onto a running image. It is deleted on a later run; if the
+rename of the new binary fails, the old one is put straight back.
+
+## Checking without installing
+
+```console
+$ snag update --check
+snag 0.1.0 is up to date
+```
+
+Other flags: `--force` reinstalls the same version, `--tag v0.1.0` installs a
+specific release, and `--manifest` reads the manifest from somewhere else
+entirely — a mirror, or a file:
+
+```bash
+snag update --manifest https://mirror.internal/snag/revision.json
+snag update --manifest ./revision.json
+```
+
+## The startup notice
+
+Occasionally, snag mentions that a newer release exists:
+
+```console
+$ snag list
+snag 0.2.0 is available (you have 0.1.0) — run `snag update`
+```
+
+It is deliberately hard for this to get in the way.
+
+**It never costs a run anything.** Startup reads a small cache file and nothing
+else. The network request that fills that cache happens on a detached background
+thread, so no invocation ever waits on `github.com`. A short command may exit
+before that thread finishes, which is fine — the cache stays stale and the next
+run tries again.
+
+**It is off unless a human is watching.** Every one of these must hold:
+
+| Gate | Reason |
+| --- | --- |
+| stderr is a terminal | A piped or redirected run is a script or a CI job |
+| `--format human` | A machine format has a consumer that did not ask for prose |
+| not `--quiet` | `-q` means the non-essential output is not wanted |
+| the command is not `update`, `revision`, or `completions` | Those speak for themselves, or are consumed by machines |
+| `SNAG_NO_UPDATE_CHECK` is unset or empty | The explicit opt-out |
+
+In CI, the first gate alone means no request is made and no notice is printed.
+
+**It does not nag.** Even when all the gates pass and an update is known, the
+notice prints on about 30% of runs. Being out of date is worth mentioning; it is
+not worth saying every single time.
+
+It goes to stderr, so `snag list > tests.txt` and `snag -f json | jq` are never
+contaminated by it.
+
+## The cache
+
+```
+$XDG_CACHE_HOME/snag/update-check.json     # LOCALAPPDATA on Windows
+~/.cache/snag/update-check.json            # when XDG_CACHE_HOME is unset
+```
+
+```json
+{"checked_at":1756234567,"version":"0.2.0","tag":"v0.2.0"}
+```
+
+An entry is refreshed once it is 24 hours old. It is written to a temp file and
+renamed into place, so a process killed mid-write cannot leave a half-parsed
+file behind, and a corrupt or unreadable cache is simply treated as missing.
+
+`snag update --check` writes the cache too, so an explicit check also quiets the
+notice for a day.
+
+Deleting the file is harmless. To stop the check entirely, export the opt-out:
+
+```bash
+export SNAG_NO_UPDATE_CHECK=1
+```
+
+## Version comparison
+
+Versions are compared as three numbers, not as text, so `0.10.0` is correctly
+newer than `0.9.0`. A `-rc1` or `+sha` suffix is ignored. Anything that does not
+parse as `major.minor.patch` never counts as newer, so a locally built binary
+with an unusual version string is not nagged at.

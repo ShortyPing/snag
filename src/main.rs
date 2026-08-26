@@ -4,10 +4,12 @@ pub mod report;
 pub mod revision;
 pub mod runner;
 pub mod scripting_registration;
+pub mod update;
 
 use crate::discovery::discover;
 use crate::revision::cmd_revision;
 use crate::runner::run;
+use crate::update::cmd_update;
 use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use std::io;
 use std::io::Write;
@@ -59,6 +61,9 @@ pub enum Command {
 
     /// Write a revision.json describing this build and its download URLs.
     Revision(RevisionArgs),
+
+    /// Replace this binary with the latest release.
+    Update(UpdateArgs),
 
     /// Generate shell completion scripts.
     Completions {
@@ -188,6 +193,30 @@ pub struct RevisionArgs {
     pub repo: String,
 }
 
+#[derive(Debug, Args)]
+pub struct UpdateArgs {
+    /// Report whether a newer release exists without installing it.
+    #[arg(long)]
+    pub check: bool,
+
+    /// Reinstall even when the running version is already the latest.
+    #[arg(long, conflicts_with = "check")]
+    pub force: bool,
+
+    /// Install this release instead of the latest.
+    #[arg(long, value_name = "TAG")]
+    pub tag: Option<String>,
+
+    /// Read the manifest from this file path or http(s) URL instead of the
+    /// release on GitHub. For mirrors and air-gapped installs.
+    #[arg(long, value_name = "SOURCE", conflicts_with = "tag")]
+    pub manifest: Option<String>,
+
+    /// GitHub repository to fetch the release from.
+    #[arg(long, value_name = "OWNER/NAME", default_value = revision::DEFAULT_REPO)]
+    pub repo: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum Format {
     /// Pretty, colored, for humans.
@@ -251,12 +280,15 @@ fn main() -> ExitCode {
 
     let command = cli.command.unwrap_or_else(default_run);
 
+    update::start_check(&ctx, &command);
+
     let result = match command {
         Command::Run(args) => cmd_run(&ctx, args),
         Command::List(args) => cmd_list(&ctx, args),
         Command::Check(args) => cmd_check(&ctx, args),
         Command::Init(args) => cmd_init(&ctx, args),
         Command::Revision(args) => cmd_revision(&ctx, args),
+        Command::Update(args) => cmd_update(&ctx, args),
         Command::Completions { shell } => cmd_completions(shell),
     };
 
@@ -264,8 +296,10 @@ fn main() -> ExitCode {
         Ok(exit) => exit.into(),
         // A closed pipe (`snag list | head`) isn't an error.
         Err(err) if is_broken_pipe(&err) => Exit::Ok.into(),
+        // Alternate form prints the whole chain, so the cause that actually
+        // explains the failure is not hidden behind the outermost context.
         Err(err) => {
-            eprintln!("Error: {err}");
+            eprintln!("Error: {err:#}");
             Exit::Error.into()
         }
     }
@@ -285,6 +319,7 @@ const VERBS: &[&str] = &[
     "check",
     "init",
     "revision",
+    "update",
     "completions",
     "help",
 ];
@@ -340,7 +375,7 @@ fn implicit_run<I: IntoIterator<Item = String>>(args: I) -> Vec<String> {
     args
 }
 
-fn default_run() -> Command {
+pub(crate) fn default_run() -> Command {
     Command::Run(RunArgs {
         selection: SelectionArgs {
             paths: vec![],
