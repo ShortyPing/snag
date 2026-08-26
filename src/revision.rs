@@ -194,7 +194,7 @@ pub fn cmd_revision(ctx: &Ctx, args: RevisionArgs) -> anyhow::Result<Exit> {
             args.output.display(),
             revision.tag,
             revision.build,
-            &revision.commit,
+            revision.commit,
             revision.released_at
         );
     }
