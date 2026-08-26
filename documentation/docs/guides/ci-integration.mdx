@@ -113,6 +113,24 @@ The pattern most suites converge on:
 | merge to main | `snag tests/` | Everything, no retries — the truth |
 | nightly | `snag tests/ --retries 1 --seed $RANDOM` | Shuffled order surfaces order-dependence |
 
+### Installing a release binary instead of building
+
+Compiling snag in every job costs a minute or two even with the cache. To pull a
+prebuilt binary instead, resolve the URL from the release manifest:
+
+```yaml
+      - name: Install snag
+        run: |
+          url=$(curl -fsSL https://github.com/ShortyPing/snag/releases/latest/download/revision.json \
+            | jq -r '.platforms["x86_64-unknown-linux-gnu"].url')
+          curl -fsSL "$url" -o /usr/local/bin/snag
+          chmod +x /usr/local/bin/snag
+```
+
+Pin a release rather than tracking `latest` when a job must be reproducible:
+swap `latest/download` for `download/v0.1.0`. See
+[revision.json](../reference/revision-file.mdx) for the full schema.
+
 ## GitLab CI
 
 ```yaml title=".gitlab-ci.yml"

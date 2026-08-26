@@ -17,13 +17,14 @@ snag [OPTIONS] [COMMAND]
 | [`list`](#snag-list) | Discover and print tests without executing them |
 | [`check`](#snag-check) | Parse manifests and compile scripts, no network |
 | [`init`](#snag-init) | Scaffold a suite plus an example script |
+| [`revision`](#snag-revision) | Write the release manifest for this build |
 | [`completions`](#snag-completions) | Generate a shell completion script |
 
 ## The implicit `run` verb
 
 `snag demo/suite.toml` is rewritten to `snag run demo/suite.toml`. The rule: if
 the first non-flag argument is not one of `run`, `list`, `check`, `init`,
-`completions`, or `help`, then `run` is inserted in front of it. Arguments after
+`revision`, `completions`, or `help`, then `run` is inserted in front of it. Arguments after
 a `--` separator are left alone.
 
 ```bash
@@ -218,6 +219,64 @@ directories are created as needed — `snag init tests/api.snag.toml` writes
 `tests/api.snag.toml` and `tests/get_status.snag`. An existing manifest is never
 overwritten without `--force`; an existing script is left alone the same way.
 
+## `snag revision`
+
+```
+snag revision [OPTIONS]
+```
+
+Writes a [`revision.json`](./revision-file.mdx) describing this build: the
+version it was compiled as, the commit it was compiled from, and a download URL
+for each released platform. The release workflow runs it on every tag and
+uploads the result next to the binaries.
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `-o`, `--output <FILE>` | `revision.json` | Where to write it. `-` writes to stdout |
+| `--tag <TAG>` | `v{version}` | Release tag the download URLs point at |
+| `--commit <SHA>` | the commit baked in at build time | Commit hash to record |
+| `--repo <OWNER/NAME>` | `ShortyPing/snag` | Repository hosting the release assets |
+| `--build <N>` | one past the previous release's | Build number to record. Skips the lookup |
+| `--previous <SOURCE>` | the latest release asset in `--repo` | File path or `http(s)` URL to increment from |
+| `--offline` | off | Skip the lookup and start the build number at `1` |
+
+```console
+$ snag revision
+wrote revision.json (v0.1.0 build 1 41795ba65fb5a667b606f91a139390c415c7306f at 2026-08-26T18:57:11Z)
+```
+
+### The build number
+
+`build` counts releases, not invocations: each generated file is one past the
+build number in the previous release's `revision.json`. Without `--previous`,
+that file is fetched over the network from
+`https://github.com/{repo}/releases/latest/download/revision.json`, with a
+10-second timeout.
+
+A lookup that finds nothing starts the count at `1`, which is right for a first
+release and wrong for a network blip — so the fallback always says so on stderr:
+
+```console
+$ snag revision --previous ./does-not-exist.json -o -
+warning: no previous revision at ./does-not-exist.json (reading ./does-not-exist.json: No such file or directory (os error 2))
+warning: starting the build number at 1
+```
+
+`-q` does not silence those two lines. In a pipeline, resolve the previous file
+yourself and pass `--previous`, so a failed download fails the job instead of
+rewinding the counter — see [revision.json](./revision-file.mdx#how-releases-produce-it).
+
+Use `--offline` for a deliberate first release, and `--build N` to set the
+number outright. The three flags are mutually exclusive.
+
+The version comes from the crate itself and cannot be overridden — the whole
+point is that the file reports what the binary generating it actually is. The
+tag can differ from the version (`--tag nightly`) when assets live under a
+moving tag; the URLs follow the tag, the `version` field follows the binary.
+
+`-q` suppresses the confirmation line. `--format` has no effect here: the output
+is always JSON.
+
 ## `snag completions`
 
 ```
@@ -250,3 +309,7 @@ See [exit codes](./exit-codes.mdx) for the full contract.
 Snag reads no configuration from the environment. Scripts read it explicitly
 with `env("NAME")` and `env_or("NAME", "default")`; anything you export before
 invoking `snag` is visible to them.
+
+One variable is read at *build* time, not at run time: `SNAG_GIT_COMMIT` sets
+the commit hash `snag revision` reports. Unset, the build asks `git rev-parse
+HEAD`, and falls back to `unknown` outside a checkout.

@@ -41,6 +41,7 @@ const sidebars: SidebarsConfig = {
         'reference/script-api',
         'reference/report-formats',
         'reference/exit-codes',
+        'reference/revision-file',
       ],
     },
     {

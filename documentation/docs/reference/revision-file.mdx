@@ -1,0 +1,171 @@
+---
+id: revision-file
+title: revision.json
+sidebar_position: 6
+description: The release manifest snag publishes on every tag - schema, URLs, and how to consume it.
+---
+
+# `revision.json`
+
+Every tagged release publishes a `revision.json` next to the binaries. It names
+the version, an incrementing build number, the commit it was built from, and the
+download URL for each platform, so an installer or update check can resolve a release without
+scraping the releases page.
+
+Stable URLs:
+
+```
+https://github.com/ShortyPing/snag/releases/latest/download/revision.json
+https://github.com/ShortyPing/snag/releases/download/v0.1.0/revision.json
+```
+
+The `latest` URL always redirects to the newest release, which makes it the
+endpoint to poll.
+
+## Schema
+
+```json
+{
+  "version": "0.1.0",
+  "build": 3,
+  "commit": "41795ba65fb5a667b606f91a139390c415c7306f",
+  "tag": "v0.1.0",
+  "repository": "ShortyPing/snag",
+  "released_at": "2026-08-26T18:57:11Z",
+  "platforms": {
+    "aarch64-apple-darwin": {
+      "os": "macos",
+      "arch": "aarch64",
+      "target": "aarch64-apple-darwin",
+      "binary": "snag-aarch64-apple-darwin",
+      "url": "https://github.com/ShortyPing/snag/releases/download/v0.1.0/snag-aarch64-apple-darwin"
+    },
+    "x86_64-pc-windows-msvc": {
+      "os": "windows",
+      "arch": "x86_64",
+      "target": "x86_64-pc-windows-msvc",
+      "binary": "snag-x86_64-pc-windows-msvc.exe",
+      "url": "https://github.com/ShortyPing/snag/releases/download/v0.1.0/snag-x86_64-pc-windows-msvc.exe"
+    },
+    "x86_64-unknown-linux-gnu": {
+      "os": "linux",
+      "arch": "x86_64",
+      "target": "x86_64-unknown-linux-gnu",
+      "binary": "snag-x86_64-unknown-linux-gnu",
+      "url": "https://github.com/ShortyPing/snag/releases/download/v0.1.0/snag-x86_64-unknown-linux-gnu"
+    }
+  }
+}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `version` | The crate version of the binary that generated the file |
+| `build` | Release counter, one past the previous release's. Starts at `1` |
+| `commit` | Full git SHA the release was built from |
+| `tag` | Release tag the URLs point at. Usually `v{version}` |
+| `repository` | `owner/name` hosting the assets |
+| `released_at` | RFC 3339 UTC timestamp, second precision |
+| `platforms` | Object keyed by Rust target triple |
+
+Each platform entry carries `os`, `arch`, `target`, the asset's `binary` file
+name, and the absolute `url` to download it.
+
+`build` increments per **release**, not per generation: the release job reads
+the previous release's `revision.json` and adds one. It is the field to compare
+when a version alone is ambiguous — two releases can share a `version` (a
+re-tagged fix, a rebuilt artifact) but never a `build`. A file written before
+this field existed parses as `build: 1`.
+
+:::caution The counter can only be trusted going forward
+Nothing enforces monotonicity server-side. If a release is generated with
+`--offline`, `--build`, or after a failed lookup, its number is whatever that
+run decided, and the next release counts on from there.
+:::
+
+`platforms` is keyed rather than a list so a consumer can look up its own target
+directly, and the keys are sorted, so the file is byte-stable for a given
+input — a diff between two releases shows only what changed.
+
+## Consuming it
+
+Resolve the download URL for the current machine:
+
+```bash
+curl -fsSL https://github.com/ShortyPing/snag/releases/latest/download/revision.json \
+  | jq -r '.platforms["x86_64-unknown-linux-gnu"].url'
+```
+
+Compare builds rather than versions when a version can be re-released:
+
+```bash
+curl -fsSL https://github.com/ShortyPing/snag/releases/latest/download/revision.json | jq -r .build
+```
+
+Check whether an installed binary is behind:
+
+```bash
+latest=$(curl -fsSL https://github.com/ShortyPing/snag/releases/latest/download/revision.json | jq -r .version)
+[ "$latest" = "$(snag --version | cut -d' ' -f2)" ] || echo "snag $latest is out"
+```
+
+Rust targets map onto `uname` output closely enough to pick a key from a shell
+script: `x86_64`/`aarch64` for the arch, `linux`/`darwin` for the OS.
+
+## Generating one locally
+
+[`snag revision`](./cli.mdx#snag-revision) writes the same file from any build:
+
+```console
+$ snag revision -o -
+```
+
+By default this reaches out to the latest release to read its build number.
+`--offline` skips that and starts at `1`, `--previous FILE` increments from a
+file you already have, and `--build N` sets the number outright.
+
+Locally the `commit` is whatever `git rev-parse HEAD` returned when the binary
+was compiled, and `unknown` if it was built outside a checkout. Release builds
+get the exact SHA passed in by CI, so a published `revision.json` always names a
+real commit.
+
+## How releases produce it
+
+`.github/workflows/release.yml` runs on tags matching `v*`:
+
+1. Verify the tag matches the version in `Cargo.toml`, then run fmt, clippy, and
+   the test suite.
+2. Build all three targets, stamping `SNAG_GIT_COMMIT` with the tagged SHA.
+3. Resolve the previous release through `gh` and download its `revision.json`.
+4. Run `snag revision` **using the Linux binary just built**, so the version and
+   commit it reports are the ones actually shipped.
+5. Create the GitHub release with the binaries and `revision.json` attached.
+
+Step 3 exists because of how the fallback behaves. `snag revision` starts the
+count at `1` whenever it cannot read a previous file, and an unreachable network
+looks exactly like a first release — which would rewind the counter. Listing
+releases through `gh` separates the two: no releases at all means `--offline`
+and a genuine start at `1`, a listing that fails means the API is down and the
+job stops:
+
+```yaml
+          latest=$(gh release list --repo "$GITHUB_REPOSITORY" --limit 1 \
+            --json tagName --jq '.[0].tagName // ""')
+
+          if [ -z "$latest" ]; then
+            echo "flag=--offline" >> "$GITHUB_OUTPUT"
+          elif gh release download "$latest" --repo "$GITHUB_REPOSITORY" \
+                 --pattern revision.json --dir previous; then
+            echo "flag=--previous previous/revision.json" >> "$GITHUB_OUTPUT"
+          else
+            echo "flag=--offline" >> "$GITHUB_OUTPUT"
+          fi
+```
+
+`set -euo pipefail` on that step is what turns a failed listing into a failed
+job. The last branch covers a release that predates `revision.json`: the listing
+worked, so the API is up and the asset is simply not there.
+
+Adding a platform means editing `TARGETS` in `src/revision.rs` and the build
+matrix together — the asset names in the file come from `TARGETS`, and nothing
+verifies at runtime that a URL it advertises was really uploaded.

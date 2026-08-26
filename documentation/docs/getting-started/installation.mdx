@@ -39,6 +39,27 @@ The binary lands at `target/release/snag`. Put it on your `PATH`:
 install -m 0755 target/release/snag /usr/local/bin/snag
 ```
 
+## Download a release binary
+
+Every tagged release attaches a binary per platform, plus a
+[`revision.json`](../reference/revision-file.mdx) that maps each target triple
+to its download URL:
+
+```bash
+curl -fsSLO https://github.com/ShortyPing/snag/releases/latest/download/snag-x86_64-unknown-linux-gnu
+chmod +x snag-x86_64-unknown-linux-gnu
+sudo mv snag-x86_64-unknown-linux-gnu /usr/local/bin/snag
+```
+
+Swap the asset name for `snag-aarch64-apple-darwin` on Apple Silicon, or
+`snag-x86_64-pc-windows-msvc.exe` on Windows. To resolve the URL from a script
+instead of hardcoding it, read `revision.json`:
+
+```bash
+curl -fsSL https://github.com/ShortyPing/snag/releases/latest/download/revision.json \
+  | jq -r '.platforms["x86_64-unknown-linux-gnu"].url'
+```
+
 ## Install with cargo
 
 From a clone, or straight from the repository:

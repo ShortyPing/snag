@@ -1,10 +1,12 @@
 pub mod discovery;
 pub mod manifest;
 pub mod report;
+pub mod revision;
 pub mod runner;
 pub mod scripting_registration;
 
 use crate::discovery::discover;
+use crate::revision::cmd_revision;
 use crate::runner::run;
 use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use std::io;
@@ -54,6 +56,9 @@ pub enum Command {
 
     /// Scaffold a new example definition file in the current directory.
     Init(InitArgs),
+
+    /// Write a revision.json describing this build and its download URLs.
+    Revision(RevisionArgs),
 
     /// Generate shell completion scripts.
     Completions {
@@ -146,6 +151,43 @@ pub struct InitArgs {
     pub force: bool,
 }
 
+#[derive(Debug, Args)]
+pub struct RevisionArgs {
+    /// Where to write the manifest. "-" writes to stdout.
+    #[arg(
+        long,
+        short = 'o',
+        value_name = "FILE",
+        default_value = "revision.json"
+    )]
+    pub output: PathBuf,
+
+    /// Release tag the download URLs point at. Defaults to "v{version}".
+    #[arg(long, value_name = "TAG")]
+    pub tag: Option<String>,
+
+    /// Commit hash to record. Defaults to the one baked in at build time.
+    #[arg(long, value_name = "SHA")]
+    pub commit: Option<String>,
+
+    /// Build number to record. Skips looking up the previous revision.
+    #[arg(long, value_name = "N", conflicts_with_all = ["previous", "offline"])]
+    pub build: Option<u64>,
+
+    /// Previous revision.json to increment the build number from: a file path
+    /// or an http(s) URL. Defaults to the latest release asset in --repo.
+    #[arg(long, value_name = "SOURCE", conflicts_with = "offline")]
+    pub previous: Option<String>,
+
+    /// Don't look the previous revision up; start the build number at 1.
+    #[arg(long)]
+    pub offline: bool,
+
+    /// GitHub repository hosting the release assets.
+    #[arg(long, value_name = "OWNER/NAME", default_value = revision::DEFAULT_REPO)]
+    pub repo: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum Format {
     /// Pretty, colored, for humans.
@@ -214,6 +256,7 @@ fn main() -> ExitCode {
         Command::List(args) => cmd_list(&ctx, args),
         Command::Check(args) => cmd_check(&ctx, args),
         Command::Init(args) => cmd_init(&ctx, args),
+        Command::Revision(args) => cmd_revision(&ctx, args),
         Command::Completions { shell } => cmd_completions(shell),
     };
 
@@ -236,7 +279,15 @@ fn is_broken_pipe(err: &anyhow::Error) -> bool {
     })
 }
 
-const VERBS: &[&str] = &["run", "list", "check", "init", "completions", "help"];
+const VERBS: &[&str] = &[
+    "run",
+    "list",
+    "check",
+    "init",
+    "revision",
+    "completions",
+    "help",
+];
 
 // Turn `snag ./suite.toml` into `snag run ./suite.toml`. clap won't accept a
 // variadic positional alongside subcommands, so the verb goes in by hand.
@@ -257,6 +308,12 @@ fn implicit_run<I: IntoIterator<Item = String>>(args: I) -> Vec<String> {
         "--retries",
         "--seed",
         "--report",
+        "-o",
+        "--output",
+        "--commit",
+        "--repo",
+        "--build",
+        "--previous",
     ];
 
     let mut args: Vec<String> = args.into_iter().collect();
