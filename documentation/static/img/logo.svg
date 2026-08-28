@@ -1,15 +1,1 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Snag logo">
-  <defs>
-    <linearGradient id="snagGrad" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0%" stop-color="#3ddac4"/>
-      <stop offset="100%" stop-color="#0d7d70"/>
-    </linearGradient>
-  </defs>
-  <rect x="2" y="2" width="60" height="60" rx="15" fill="url(#snagGrad)"/>
-  <path d="M40 14v18a10 10 0 0 1-20 0"
-        fill="none" stroke="#04211f" stroke-width="6"
-        stroke-linecap="round" stroke-linejoin="round"/>
-  <path d="M25 40.5 30.5 46 45.5 31"
-        fill="none" stroke="#fbbf24" stroke-width="6"
-        stroke-linecap="round" stroke-linejoin="round"/>
-</svg>
+<svg xmlns="http://www.w3.org/2000/svg" width="78" height="24" viewBox="0 0 78 24" fill="none" role="img"><title>snag</title><g fill="currentColor"><circle cx="4" cy="4" r="1.6"/><circle cx="8.5" cy="4" r="1.6"/><circle cx="13" cy="4" r="1.6"/><circle cx="4" cy="8.5" r="1.6"/><circle cx="8.5" cy="8.5" r="1.6"/><circle cx="13" cy="8.5" r="1.6"/><circle cx="4" cy="13" r="1.6"/><circle cx="8.5" cy="13" r="1.6"/><circle cx="19.2" cy="19.2" r="2.4"/></g><path d="M14.8 14.8 L16.9 16.9" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><text x="32" y="17.2" fill="currentColor" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="18" font-weight="500" letter-spacing="-0.4">snag</text></svg>
