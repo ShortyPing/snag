@@ -4,12 +4,50 @@ A regression test runner for HTTP APIs. Suites are declared in TOML, assertions
 are written in [Rhai](https://rhai.rs) scripts, and results come out in whatever
 format the consumer speaks — a terminal, a CI report, or an IDE test tree.
 
+It is a single Rust binary. There is no runtime to install next to it, no
+project scaffolding, and no configuration beyond the suite itself.
+
+**Documentation: <https://shortyping.github.io/snag/>**
+
+```console
+$ snag demo/suite.toml -t fast -v
+running 1 test across 1 suite
+PASS assertion helpers, no network [8ms]
+    | running against local
+
+test result: ok. 1 passed; 0 failed; 0 timed out; 0 skipped; finished in 8ms
+```
+
+## Install
+
+```bash
+cargo install --git https://github.com/ShortyPing/snag.git
+```
+
+Or grab a binary from the [latest release](https://github.com/ShortyPing/snag/releases/latest):
+
+```bash
+curl -fsSLO https://github.com/ShortyPing/snag/releases/latest/download/snag-x86_64-unknown-linux-gnu
+chmod +x snag-x86_64-unknown-linux-gnu
+sudo mv snag-x86_64-unknown-linux-gnu /usr/local/bin/snag
+```
+
+Swap the asset name for `snag-aarch64-apple-darwin` on Apple Silicon, or
+`snag-x86_64-pc-windows-msvc.exe` on Windows. Once installed, `snag update`
+replaces it in place. Building from a clone works too — `cargo build --release`,
+binary at `target/release/snag`. See the
+[installation guide](https://shortyping.github.io/snag/docs/getting-started/installation/)
+for shell completions and CI setups.
+
+## Commands
+
 ```
 snag                     # run every suite found under the current directory
 snag demo/suite.toml     # run one suite (the `run` verb is implicit)
 snag list --long         # discover tests without executing them
 snag check               # parse manifests and compile scripts only
 snag init                # scaffold a suite.toml plus an example script
+snag update              # replace the binary with the latest release
 ```
 
 ## Suite files
@@ -71,6 +109,8 @@ body by dotted path (a missing key fails the test rather than returning `()`).
 `sleep_ms(n)`, `print(...)` and `print_response(res)`. Printed output is captured
 per test, shown under failures, and under passes with `-v`.
 
+Full list in the [script API reference](https://shortyping.github.io/snag/docs/reference/script-api/).
+
 ## Setup and teardown
 
 Shared steps live in their own scripts and are wired up per suite or per test.
@@ -117,3 +157,11 @@ the terminal and writes the machine report to a file — with `--format human`
 that file gets JSON, since a human report is nothing a tool can read.
 
 Exit codes: `0` all green, `1` tests failed, `2` could not run.
+
+## Status
+
+Version `0.1.1`. What is documented is what the binary does today. Deliberately
+out of scope so far: response schema validation, recorded fixtures and replay,
+cookie jars and redirect policy control, and any form of distributed execution.
+
+Licensed under [GPL-3.0](LICENSE.txt).
