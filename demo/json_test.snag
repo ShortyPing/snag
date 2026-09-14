@@ -1,5 +1,5 @@
 let res = post(`${base_url}/post`)
-    .json(#{ project: "snag", ok: true })
+    .json(payload)
     .send();
 
 assert_ok(res);

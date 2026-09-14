@@ -476,12 +476,12 @@ timeout = "10s"
 file = "./get_status.snag"
 
 [test.variables]
-expected = "200"
+expected_status = 200
 "#;
 
     const SCRIPT_TEMPLATE: &str = r"let res = get(`${base_url}/status/200`).send();
 
-assert_status(res, 200);
+assert_status(res, expected_status);
 assert_faster_than(res, 5000);
 ";
 

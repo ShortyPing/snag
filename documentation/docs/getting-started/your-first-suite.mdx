@@ -82,8 +82,9 @@ Backtick strings are Rhai's template literals — `${...}` interpolates. Because
 variables arrive as constants, a script cannot reassign `base_url` and quietly
 retarget itself halfway through.
 
-Variable values are always **strings**. To pass a number or a flag, convert in
-the script: `let retries = retry_count.parse_int();`.
+Variables keep their TOML type: `retry_count = 3` is an integer in the script,
+`[variables.payload]` is a map. See
+[Variables and secrets](../guides/variables-and-secrets.mdx).
 
 ## Step 4 — add tags
 

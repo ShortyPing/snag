@@ -110,7 +110,8 @@ ignored. Durations go through `humantime_serde`.
 
 - `name` falls back to `id`, `parallel_safe` to `true`
 - `timeout` falls back to the file-level timeout
-- suite variables are cloned and then extended with the test's, so test keys win
+- suite variables are cloned and then extended with the test's, so test keys win;
+  values are converted from TOML to JSON so the runner can hand them to Rhai
 - `script` is `manifest_dir.join(file)`, normalised to drop `.` components while
   leaving `..` alone — resolving `..` textually would be wrong through a symlink
 - duplicate ids inside one file are rejected

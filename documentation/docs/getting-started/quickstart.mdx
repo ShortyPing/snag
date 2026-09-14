@@ -38,13 +38,13 @@ timeout = "10s"
 file = "./get_status.snag"
 
 [test.variables]
-expected = "200"
+expected_status = 200
 ```
 
 ```js title="get_status.snag"
 let res = get(`${base_url}/status/200`).send();
 
-assert_status(res, 200);
+assert_status(res, expected_status);
 assert_faster_than(res, 5000);
 ```
 
@@ -93,7 +93,7 @@ test result: ok. 1 passed; 0 failed; 0 timed out; 0 skipped; finished in 285ms
 Change the assertion so it expects the wrong status:
 
 ```diff title="get_status.snag"
--assert_status(res, 200);
+-assert_status(res, expected_status);
 +assert_status(res, 201);
 ```
 

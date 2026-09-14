@@ -35,7 +35,7 @@ currency = "USD"
 | --- | --- | --- | --- |
 | `title` | string | `"Untitled suite"` | Suite label. Appears in reports — JUnit `classname`, TeamCity suite name, the JSON `suite` field |
 | `timeout` | duration string | none | Default per-test timeout for this file |
-| `variables` | table of string → string | `{}` | Variables shared by every test in the file |
+| `variables` | table of string → [any TOML value](#variables) | `{}` | Variables shared by every test in the file |
 | `setup` | [hook](#hooks) | none | Script(s) run before every test in the file |
 | `teardown` | [hook](#hooks) | none | Script(s) run after every test in the file |
 | `test` | array of tables | `[]` | The tests, written as repeated `[[test]]` blocks |
@@ -52,7 +52,7 @@ An empty manifest is valid and contributes zero tests.
 | `tags` | array of strings | no | `[]` | Selection tags, matched exactly by `-t` |
 | `timeout` | duration string | no | the suite `timeout` | Per-test timeout |
 | `parallel_safe` | bool | no | `true` | `false` pins the test to the serial phase |
-| `variables` | table of string → string | no | `{}` | Overrides of suite variables, for this test only |
+| `variables` | table of string → [any TOML value](#variables) | no | `{}` | Overrides of suite variables, for this test only |
 | `setup` | [hook](#hooks) | no | none | Script(s) run before this test, after the suite's `setup` |
 | `teardown` | [hook](#hooks) | no | none | Script(s) run after this test, before the suite's `teardown` |
 
@@ -77,18 +77,39 @@ Parsed with [humantime](https://docs.rs/humantime). A unit is mandatory.
 
 ### Variables
 
-Both `[variables]` and `[test.variables]` are flat maps of string to **string**.
-Numbers, booleans, arrays, and nested tables are not accepted — quote the value
-and convert in the script:
+`[variables]` and `[test.variables]` accept any TOML value. Types are preserved
+on the way into the script:
+
+| TOML | In the script |
+| --- | --- |
+| string | string |
+| integer | integer |
+| float | float (`inf` and `nan` are rejected at load time) |
+| boolean | bool |
+| array | array |
+| table | object map |
+| datetime | string, in RFC 3339 form |
 
 ```toml
 [variables]
-max_latency_ms = "800"
+max_latency_ms = 800
+retries = [1, 2, 3]
+
+[variables.payload]          # a sub-table becomes a map
+project = "snag"
+ok = true
 ```
 
 ```js
-assert_faster_than(res, max_latency_ms.parse_int());
+assert_faster_than(res, max_latency_ms);
+let res = post(`${base_url}/items`).json(payload).send();
+assert_eq(payload.project, "snag");
+assert_eq(field(payload, "ok"), true);
 ```
+
+A test overrides a sub-table with `[test.variables.payload]`. Values arrive as
+constants, so `payload.ok = false` fails the same way reassigning `payload`
+would.
 
 ### Hooks
 
@@ -156,8 +177,8 @@ comment out `[[test]]` blocks until `snag list` succeeds.
 
 ## Precedence
 
-**Variables** — a test's key wins over the suite's key. Flat, per key, no deep
-merge:
+**Variables** — a test's key wins over the suite's key. Per key, no deep
+merge: a test-level table replaces the suite's table under that key as a whole.
 
 ```
 [variables]  →  [test.variables]
@@ -187,7 +208,7 @@ What the runner sees after a manifest is loaded, one per `[[test]]`:
 | `timeout` | test `timeout`, else suite `timeout` |
 | `parallel_safe` | `parallel_safe`, else `true` |
 | `script` | `file`, joined to the manifest's directory and normalised |
-| `vars` | suite `variables` merged with test `variables` |
+| `vars` | suite `variables` merged with test `variables`, TOML types preserved |
 | `setup` | suite `setup` followed by test `setup`, paths resolved |
 | `teardown` | test `teardown` followed by suite `teardown`, paths resolved |
 | `suite_title` | `title` |
