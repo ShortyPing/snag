@@ -12,7 +12,7 @@ pub struct Manifest {
     pub title: String,
 
     #[serde(default)]
-    pub variables: BTreeMap<String, String>,
+    pub variables: BTreeMap<String, toml::Value>,
 
     #[serde(default, with = "humantime_serde")]
     pub timeout: Option<Duration>,
@@ -91,7 +91,7 @@ pub struct TestDefinition {
     pub file: PathBuf,
 
     #[serde(default)]
-    pub variables: BTreeMap<String, String>,
+    pub variables: BTreeMap<String, toml::Value>,
 
     #[serde(default)]
     pub setup: Option<HookSpec>,
@@ -110,7 +110,10 @@ pub struct Test {
     pub timeout: Option<Duration>,
     pub parallel_safe: bool,
     pub script: PathBuf,
-    pub vars: BTreeMap<String, String>,
+    // JSON rather than TOML values: the runner turns them into Rhai values with
+    // serde, and TOML datetimes serialise as a private struct that would show up
+    // in scripts as a map with a `$__toml_private_datetime` key.
+    pub vars: BTreeMap<String, serde_json::Value>,
     // Suite hooks first, then the test's own; teardown runs in reverse.
     pub setup: Vec<Hook>,
     pub teardown: Vec<Hook>,
@@ -145,8 +148,14 @@ pub fn load_suite(path: &Path) -> anyhow::Result<Vec<Test>> {
             anyhow::bail!("duplicate test id `{}` in {}", def.id, path.display());
         }
 
-        let mut vars = manifest.variables.clone();
-        vars.extend(def.variables.clone());
+        let mut merged = manifest.variables.clone();
+        merged.extend(def.variables.clone());
+        let mut vars = BTreeMap::new();
+        for (name, value) in merged {
+            let value = to_json(value)
+                .with_context(|| format!("variable `{name}` in {}", path.display()))?;
+            vars.insert(name, value);
+        }
 
         // Suite setup wraps the test's own: outermost first on the way in,
         // and the runner unwinds teardown in reverse.
@@ -215,6 +224,33 @@ fn resolve_hooks(
         .collect()
 }
 
+// TOML datetimes become their RFC 3339 text; everything else maps one to one.
+fn to_json(value: toml::Value) -> anyhow::Result<serde_json::Value> {
+    use serde_json::Value as Json;
+
+    Ok(match value {
+        toml::Value::String(s) => Json::String(s),
+        toml::Value::Integer(i) => Json::Number(i.into()),
+        toml::Value::Float(f) => serde_json::Number::from_f64(f)
+            .map(Json::Number)
+            .ok_or_else(|| anyhow::anyhow!("non-finite float {f} cannot be represented"))?,
+        toml::Value::Boolean(b) => Json::Bool(b),
+        toml::Value::Datetime(dt) => Json::String(dt.to_string()),
+        toml::Value::Array(items) => Json::Array(
+            items
+                .into_iter()
+                .map(to_json)
+                .collect::<anyhow::Result<_>>()?,
+        ),
+        toml::Value::Table(table) => Json::Object(
+            table
+                .into_iter()
+                .map(|(k, v)| to_json(v).map(|v| (k, v)))
+                .collect::<anyhow::Result<_>>()?,
+        ),
+    })
+}
+
 // Drop `.` components so paths print as `tests/api.snag`, not `./tests/./api.snag`.
 // Lexical only: `..` is left alone since resolving it can break through symlinks.
 fn normalize(path: &Path) -> PathBuf {
@@ -235,6 +271,7 @@ fn normalize(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     use std::io::Write;
 
     fn write_temp(name: &str, body: &str) -> PathBuf {
@@ -266,6 +303,76 @@ base_url = "https://test"
         let tests = load_suite(&path).unwrap();
         assert_eq!(tests[0].vars["base_url"], "https://test");
         assert_eq!(tests[0].vars["shared"], "keep");
+    }
+
+    #[test]
+    fn typed_variables_are_preserved() {
+        let path = write_temp(
+            "typed.toml",
+            r#"
+[variables]
+max_latency_ms = 800
+ratio = 0.5
+flag = true
+retries = [1, 2, 3]
+since = 2024-01-02T03:04:05Z
+
+[variables.user]
+name = "x"
+tags = ["a", "b"]
+
+[[test]]
+id = "t"
+file = "t.snag"
+"#,
+        );
+        let vars = &load_suite(&path).unwrap()[0].vars;
+        assert_eq!(vars["max_latency_ms"], json!(800));
+        assert_eq!(vars["ratio"], json!(0.5));
+        assert_eq!(vars["flag"], json!(true));
+        assert_eq!(vars["retries"], json!([1, 2, 3]));
+        assert_eq!(vars["since"], json!("2024-01-02T03:04:05Z"));
+        assert_eq!(vars["user"], json!({ "name": "x", "tags": ["a", "b"] }));
+    }
+
+    #[test]
+    fn test_table_replaces_suite_table_whole() {
+        let path = write_temp(
+            "table_override.toml",
+            r#"
+[variables.user]
+name = "suite"
+role = "admin"
+
+[[test]]
+id = "t"
+file = "t.snag"
+
+[test.variables.user]
+name = "test"
+"#,
+        );
+        let vars = &load_suite(&path).unwrap()[0].vars;
+        // Per key, no deep merge: the suite's `role` does not survive.
+        assert_eq!(vars["user"], json!({ "name": "test" }));
+    }
+
+    #[test]
+    fn non_finite_float_is_rejected() {
+        let path = write_temp(
+            "nonfinite.toml",
+            r#"
+[variables]
+x = inf
+
+[[test]]
+id = "t"
+file = "t.snag"
+"#,
+        );
+        let err = format!("{:#}", load_suite(&path).unwrap_err());
+        assert!(err.contains("variable `x` in"), "{err}");
+        assert!(err.contains("non-finite float"), "{err}");
     }
 
     #[test]

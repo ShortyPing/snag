@@ -337,7 +337,11 @@ fn execute_once(test: &Test, timeout: Option<Duration>, sink: &OutputSink) -> Re
     // Push vars as constants so a script can read `base_url` but not reassign it.
     let mut scope = Scope::new();
     for (name, value) in &test.vars {
-        scope.push_constant(name.as_str(), value.clone());
+        let value = match rhai::serde::to_dynamic(value) {
+            Ok(value) => value,
+            Err(e) => return Err(Failure::Error(format!("variable `{name}`: {e}"))),
+        };
+        scope.push_constant(name.as_str(), value);
     }
 
     let started = Instant::now();
@@ -992,6 +996,55 @@ mod tests {
             "{:?}",
             outcome.output
         );
+    }
+
+    fn typed_vars() -> BTreeMap<String, serde_json::Value> {
+        [
+            ("max_latency_ms", serde_json::json!(800)),
+            ("flag", serde_json::json!(true)),
+            (
+                "user",
+                serde_json::json!({ "name": "x", "tags": ["a", "b"] }),
+            ),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v))
+        .collect()
+    }
+
+    #[test]
+    fn typed_vars_arrive_native() {
+        let body = script(
+            "typed_vars.snag",
+            r#"
+assert_eq(max_latency_ms, 800);
+assert_eq(flag, true);
+assert_eq(user.name, "x");
+assert_eq(field(user, "tags.1"), "b");
+assert_eq(type_of(user), "map");
+"#,
+        );
+        let test = Test {
+            vars: typed_vars(),
+            ..with_script("t0", body)
+        };
+        let outcome = run_one(test);
+
+        assert_eq!(outcome.status, Status::Passed, "{:?}", outcome.message);
+    }
+
+    #[test]
+    fn table_vars_are_constants() {
+        let body = script("typed_vars_const.snag", r#"user.name = "y";"#);
+        let test = Test {
+            vars: typed_vars(),
+            ..with_script("t0", body)
+        };
+        let outcome = run_one(test);
+
+        assert_eq!(outcome.status, Status::Failed, "{:?}", outcome.message);
+        let message = outcome.message.unwrap_or_default();
+        assert!(message.contains("constant"), "{message}");
     }
 
     #[test]

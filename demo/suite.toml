@@ -24,8 +24,18 @@ file = "./json_test.snag"
 # Test-level variables win over the suite-level ones above.
 base_url = "https://httpbin.org"
 
+# A table arrives in the script as a map, ready for `.json(payload)`.
+[test.variables.payload]
+project = "snag"
+ok = true
+
 [[test]]
 id = "assertions"
 name = "assertion helpers, no network"
 tags = ["fast"]
 file = "./assertions_test.snag"
+
+[test.variables]
+# TOML types are preserved: integers, booleans, and arrays arrive as-is.
+max_latency_ms = 800
+retries = [1, 2, 3]

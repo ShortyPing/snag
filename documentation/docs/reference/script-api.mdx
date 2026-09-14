@@ -434,19 +434,26 @@ There is no `null`; the empty value is `()`. Full documentation:
 ## Scope
 
 Before a script runs, every variable resolved for the test — suite variables
-merged with test variables — is pushed into the scope as a **constant**:
+merged with test variables — is pushed into the scope as a **constant**, keeping
+its TOML type: strings, integers, floats, bools, arrays, and tables (as maps).
 
 ```toml
 [variables]
 base_url = "https://api.example.com"
+max_latency_ms = 800
+
+[variables.payload]
+project = "snag"
 ```
 
 ```js
-let res = get(`${base_url}/health`).send();   // just an identifier
+let res = post(`${base_url}/items`).json(payload).send();   // just identifiers
+assert_faster_than(res, max_latency_ms);
 ```
 
-Assigning to one is a runtime error (`Cannot modify constant base_url`). Copy it
-into a `let` first if you need a mutable version.
+Assigning to one is a runtime error (`Cannot modify constant base_url`), and so
+is writing into a map or array variable (`payload.project = "x"`). Copy it into
+a `let` first if you need a mutable version.
 
 ## What is not available
 

@@ -76,8 +76,12 @@ Schema and resolution.
 | `normalize()` | Drops `.` components, leaves `..` alone |
 | `default_title()` | `"Untitled suite"` |
 
-Variables are `BTreeMap<String, String>`, so ordering is deterministic and
-values are always strings.
+Variables are `BTreeMap<String, toml::Value>` on the manifest side and
+`BTreeMap<String, serde_json::Value>` on the resolved `Test`, converted by
+`to_json()`. The detour through JSON exists because the runner hands values to
+Rhai via serde, and a TOML datetime serialises as a private struct that would
+otherwise surface in scripts as a one-key map; `to_json()` turns it into its
+RFC 3339 string instead.
 
 **Change here when:** adding a manifest field. Remember `deny_unknown_fields`
 means old binaries reject manifests using a new field — a versioning
