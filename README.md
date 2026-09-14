@@ -160,7 +160,7 @@ Exit codes: `0` all green, `1` tests failed, `2` could not run.
 
 ## Status
 
-Version `0.1.1`. What is documented is what the binary does today. Deliberately
+Version `0.1.2`. What is documented is what the binary does today. Deliberately
 out of scope so far: response schema validation, recorded fixtures and replay,
 cookie jars and redirect policy control, and any form of distributed execution.
 
