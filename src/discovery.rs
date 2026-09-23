@@ -183,6 +183,7 @@ mod tests {
             tags: tags.iter().map(|s| s.to_string()).collect(),
             timeout: None,
             parallel_safe: true,
+            cookies: true,
             script: PathBuf::from("t.snag"),
             vars: BTreeMap::new(),
             setup: vec![],

@@ -17,6 +17,9 @@ pub struct Manifest {
     #[serde(default, with = "humantime_serde")]
     pub timeout: Option<Duration>,
 
+    // Per-test cookie jar; on unless a suite or test turns it off.
+    pub cookies: Option<bool>,
+
     #[serde(default)]
     pub setup: Option<HookSpec>,
 
@@ -88,6 +91,8 @@ pub struct TestDefinition {
     #[serde(default, with = "humantime_serde")]
     pub timeout: Option<Duration>,
 
+    pub cookies: Option<bool>,
+
     pub file: PathBuf,
 
     #[serde(default)]
@@ -109,6 +114,7 @@ pub struct Test {
     pub tags: Vec<String>,
     pub timeout: Option<Duration>,
     pub parallel_safe: bool,
+    pub cookies: bool,
     pub script: PathBuf,
     // JSON rather than TOML values: the runner turns them into Rhai values with
     // serde, and TOML datetimes serialise as a private struct that would show up
@@ -171,6 +177,7 @@ pub fn load_suite(path: &Path) -> anyhow::Result<Vec<Test>> {
             tags: def.tags.clone(),
             timeout: def.timeout.or(manifest.timeout),
             parallel_safe: def.parallel_safe.unwrap_or(true),
+            cookies: def.cookies.or(manifest.cookies).unwrap_or(true),
             script: normalize(&base.join(&def.file)),
             vars,
             setup,
@@ -389,7 +396,49 @@ file = "t.snag"
         assert_eq!(tests[0].name, "t");
         assert!(tests[0].tags.is_empty());
         assert!(tests[0].parallel_safe);
+        assert!(tests[0].cookies);
         assert_eq!(tests[0].suite_title, "Untitled suite");
+    }
+
+    #[test]
+    fn suite_cookies_setting_is_inherited_and_a_test_can_override_it() {
+        let path = write_temp(
+            "cookies.toml",
+            r#"
+cookies = false
+
+[[test]]
+id = "inherits"
+file = "t.snag"
+
+[[test]]
+id = "overrides"
+file = "t.snag"
+cookies = true
+"#,
+        );
+        let tests = load_suite(&path).unwrap();
+        assert!(
+            !tests[0].cookies,
+            "suite `cookies = false` should be inherited"
+        );
+        assert!(tests[1].cookies, "test `cookies = true` should win");
+    }
+
+    #[test]
+    fn a_misspelt_cookies_field_is_rejected() {
+        let path = write_temp(
+            "cookie_typo.toml",
+            r#"
+cookie = false
+
+[[test]]
+id = "t"
+file = "t.snag"
+"#,
+        );
+        let err = format!("{:#}", load_suite(&path).unwrap_err());
+        assert!(err.contains("unknown field `cookie`"), "{err}");
     }
 
     #[test]

@@ -1,0 +1,9 @@
+// The jar is per test: setup, body and teardown share it, nothing else does.
+set_cookie(`${base_url}/`, "sid=abc123; Path=/");
+set_cookie(`${base_url}/`, "lang=en");
+
+assert_eq(cookie(`${base_url}/account`, "sid"), "abc123");
+assert_eq(cookies(base_url).len(), 2);
+
+clear_cookies();
+assert_eq(cookies(base_url).len(), 0);

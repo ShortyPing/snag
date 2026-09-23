@@ -1,10 +1,13 @@
 use base64::Engine as Base64Engine;
 use base64::prelude::BASE64_STANDARD;
+use reqwest::Url;
+use reqwest::cookie::{CookieStore, Jar};
+use reqwest::header::HeaderValue;
 use rhai::serde::{from_dynamic, to_dynamic};
 use rhai::{Dynamic, Engine, EvalAltResult, FnPtr, Map};
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 // Per-test capture buffer, so parallel output doesn't interleave.
@@ -52,12 +55,52 @@ pub fn register_teardown(engine: &mut Engine, queue: TeardownQueue) {
     });
 }
 
+// reqwest's Jar can't be emptied, and the client owns its Arc so it can't be
+// swapped out either; clear_cookies() replaces the Jar behind this lock instead.
+#[derive(Default)]
+pub struct CookieJar(RwLock<Jar>);
+
+impl CookieJar {
+    fn clear(&self) {
+        if let Ok(mut jar) = self.0.write() {
+            *jar = Jar::default();
+        }
+    }
+
+    // What the jar would send to `url`, as name/value pairs.
+    fn pairs(&self, url: &Url) -> Vec<(String, String)> {
+        let header = self.cookies(url);
+        let text = header.as_ref().and_then(|h| h.to_str().ok()).unwrap_or("");
+        text.split(';')
+            .filter_map(|pair| {
+                let (name, value) = pair.trim().split_once('=')?;
+                Some((name.to_string(), value.to_string()))
+            })
+            .collect()
+    }
+}
+
+impl CookieStore for CookieJar {
+    fn set_cookies(&self, cookie_headers: &mut dyn Iterator<Item = &HeaderValue>, url: &Url) {
+        if let Ok(jar) = self.0.read() {
+            jar.set_cookies(cookie_headers, url);
+        }
+    }
+
+    fn cookies(&self, url: &Url) -> Option<HeaderValue> {
+        self.0.read().ok()?.cookies(url)
+    }
+}
+
 #[derive(Clone)]
 struct ReqBuilder {
     client: reqwest::blocking::Client, // cheap to clone, Arc inside
+    jar: Option<Arc<CookieJar>>,
     method: String,
     url: String,
     headers: Vec<(String, String)>,
+    // Sent on this request only; never stored in the jar.
+    cookies: Vec<(String, String)>,
     body: Option<String>,
 }
 
@@ -69,7 +112,11 @@ struct Response {
     duration_ms: u64,
 }
 
-pub fn register_http(engine: &mut Engine, client: reqwest::blocking::Client) {
+pub fn register_http(
+    engine: &mut Engine,
+    client: reqwest::blocking::Client,
+    jar: Option<Arc<CookieJar>>,
+) {
     // Nicer names than the reqwest types in error messages.
     engine.register_type_with_name::<ReqBuilder>("Request");
     engine.register_type_with_name::<Response>("Response");
@@ -77,12 +124,15 @@ pub fn register_http(engine: &mut Engine, client: reqwest::blocking::Client) {
     // get("..."), post("..."), etc. Each closure keeps its own client clone.
     for method in ["get", "post", "put", "patch", "delete", "head"] {
         let c = client.clone();
+        let j = jar.clone();
         let verb = method.to_uppercase();
         engine.register_fn(method, move |url: &str| ReqBuilder {
             client: c.clone(),
+            jar: j.clone(),
             method: verb.clone(),
             url: url.into(),
             headers: vec![],
+            cookies: vec![],
             body: None,
         });
     }
@@ -95,6 +145,10 @@ pub fn register_http(engine: &mut Engine, client: reqwest::blocking::Client) {
     engine.register_fn("bearer", |mut b: ReqBuilder, token: &str| {
         b.headers
             .push(("authorization".into(), format!("Bearer {token}")));
+        b
+    });
+    engine.register_fn("cookie", |mut b: ReqBuilder, name: &str, value: &str| {
+        b.cookies.push((name.into(), value.into()));
         b
     });
     engine.register_fn("body", |mut b: ReqBuilder, body: &str| {
@@ -122,6 +176,15 @@ pub fn register_http(engine: &mut Engine, client: reqwest::blocking::Client) {
             let mut req = b.client.request(method, &b.url);
             for (k, v) in &b.headers {
                 req = req.header(k, v);
+            }
+            // reqwest leaves the jar out entirely once a request carries its own
+            // Cookie header, so per-request cookies have to be merged in here.
+            if !b.cookies.is_empty() {
+                let stored = match (&b.jar, Url::parse(&b.url)) {
+                    (Some(jar), Ok(url)) => jar.pairs(&url),
+                    _ => vec![],
+                };
+                req = req.header("cookie", merge_cookie_header(stored, &b.cookies));
             }
             if let Some(body) = b.body {
                 req = req.body(body);
@@ -169,8 +232,92 @@ pub fn register_http(engine: &mut Engine, client: reqwest::blocking::Client) {
             .unwrap_or_default()
     });
 
+    engine.register_fn(
+        "cookie",
+        |r: &mut Response, name: &str| -> Result<String, Box<EvalAltResult>> {
+            set_cookie_value(&r.headers, name).map_err(Into::into)
+        },
+    );
+
     // field(res.json(), "a.b.0") walks a decoded body by dotted path.
     engine.register_fn("field", |value: Dynamic, path: &str| dig(value, path));
+}
+
+// Reads and writes the per-test jar. `None` means the manifest set
+// `cookies = false`; every call then says so instead of quietly doing nothing.
+pub fn register_cookies(engine: &mut Engine, jar: Option<Arc<CookieJar>>) {
+    let j = jar.clone();
+    engine.register_fn(
+        "cookie",
+        move |url: &str, name: &str| -> Result<String, Box<EvalAltResult>> {
+            let pairs = enabled(j.as_deref())?.pairs(&parse_url(url)?);
+            pairs
+                .iter()
+                .find(|(k, _)| k == name)
+                .map(|(_, v)| v.clone())
+                .ok_or_else(|| {
+                    format!("no cookie `{name}` for {url}, jar has: {}", names(&pairs)).into()
+                })
+        },
+    );
+
+    let j = jar.clone();
+    engine.register_fn(
+        "cookies",
+        move |url: &str| -> Result<Map, Box<EvalAltResult>> {
+            let pairs = enabled(j.as_deref())?.pairs(&parse_url(url)?);
+            Ok(pairs
+                .into_iter()
+                .map(|(k, v)| (k.into(), Dynamic::from(v)))
+                .collect())
+        },
+    );
+
+    let j = jar.clone();
+    engine.register_fn(
+        "set_cookie",
+        move |url: &str, cookie: &str| -> Result<(), Box<EvalAltResult>> {
+            let jar = enabled(j.as_deref())?;
+            let parsed = parse_url(url)?;
+            let name = cookie
+                .split(';')
+                .next()
+                .and_then(|pair| pair.split_once('='))
+                .map(|(k, _)| k.trim())
+                .filter(|k| !k.is_empty())
+                .ok_or_else(|| format!("bad cookie {cookie:?}: expected `name=value`"))?;
+            jar.0
+                .read()
+                .map_err(|_| "cookie jar is poisoned")?
+                .add_cookie_str(cookie, &parsed);
+            // add_cookie_str drops a cookie it won't store without a word.
+            if jar.pairs(&parsed).iter().any(|(k, _)| k == name) {
+                return Ok(());
+            }
+            Err(format!(
+                "cookie `{name}` was not stored for {url}: domain, path or Secure does not match"
+            )
+            .into())
+        },
+    );
+
+    engine.register_fn(
+        "clear_cookies",
+        move || -> Result<(), Box<EvalAltResult>> {
+            enabled(jar.as_deref())?.clear();
+            Ok(())
+        },
+    );
+}
+
+fn enabled(jar: Option<&CookieJar>) -> Result<&CookieJar, Box<EvalAltResult>> {
+    jar.ok_or_else(|| {
+        "cookie jar is disabled for this test (cookies = false in the manifest)".into()
+    })
+}
+
+fn parse_url(url: &str) -> Result<Url, Box<EvalAltResult>> {
+    Url::parse(url).map_err(|e| format!("bad URL {url:?}: {e}").into())
 }
 
 // Routes print/debug and print_response into the sink instead of stdout.
@@ -341,6 +488,44 @@ fn dig(value: Dynamic, path: &str) -> Result<Dynamic, Box<EvalAltResult>> {
     Ok(current)
 }
 
+// The value a response set for `name`, from its Set-Cookie headers.
+fn set_cookie_value(headers: &[(String, String)], name: &str) -> Result<String, String> {
+    let set: Vec<(String, String)> = headers
+        .iter()
+        .filter(|(k, _)| k.eq_ignore_ascii_case("set-cookie"))
+        .filter_map(|(_, v)| {
+            let (k, v) = v.split(';').next()?.split_once('=')?;
+            Some((k.trim().to_string(), v.trim().to_string()))
+        })
+        .collect();
+    set.iter()
+        .find(|(k, _)| k == name)
+        .map(|(_, v)| v.clone())
+        .ok_or_else(|| format!("no cookie `{name}` in Set-Cookie, got: {}", names(&set)))
+}
+
+// Jar cookies first, minus any the request overrides by name, then the request's own.
+fn merge_cookie_header(stored: Vec<(String, String)>, extra: &[(String, String)]) -> String {
+    stored
+        .into_iter()
+        .filter(|(k, _)| !extra.iter().any(|(e, _)| e == k))
+        .chain(extra.iter().cloned())
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+fn names(pairs: &[(String, String)]) -> String {
+    if pairs.is_empty() {
+        return "none".into();
+    }
+    pairs
+        .iter()
+        .map(|(k, _)| k.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 fn json_to_dynamic(text: &str) -> Result<Dynamic, Box<EvalAltResult>> {
     let value: serde_json::Value =
         serde_json::from_str(text).map_err(|e| format!("response body is not valid JSON: {e}"))?;
@@ -360,7 +545,7 @@ mod tests {
         let mut e = Engine::new();
         register_assertions(&mut e);
         register_env(&mut e);
-        register_http(&mut e, reqwest::blocking::Client::new());
+        register_http(&mut e, reqwest::blocking::Client::new(), None);
         e
     }
 
@@ -412,6 +597,152 @@ mod tests {
             .eval(r#"env_or("SNAG_DEFINITELY_UNSET_VAR", "fallback")"#)
             .unwrap();
         assert_eq!(v, "fallback");
+    }
+
+    fn cookie_engine(jar: Option<Arc<CookieJar>>) -> Engine {
+        let mut e = engine();
+        register_cookies(&mut e, jar);
+        e
+    }
+
+    fn jar() -> Option<Arc<CookieJar>> {
+        Some(Arc::new(CookieJar::default()))
+    }
+
+    #[test]
+    fn set_cookie_then_read_it_back() {
+        let e = cookie_engine(jar());
+        let v: String = e
+            .eval(
+                r#"set_cookie("https://api.test/", "sid=abc; Path=/");
+                   cookie("https://api.test/users", "sid")"#,
+            )
+            .unwrap();
+        assert_eq!(v, "abc");
+    }
+
+    #[test]
+    fn cookies_returns_every_cookie_for_the_url() {
+        let e = cookie_engine(jar());
+        let out: Map = e
+            .eval(
+                r#"set_cookie("https://api.test/", "a=1");
+                   set_cookie("https://api.test/", "b=2");
+                   cookies("https://api.test/")"#,
+            )
+            .unwrap();
+        assert_eq!(out.len(), 2, "{out:?}");
+        assert_eq!(out["a"].clone().into_string().unwrap(), "1");
+    }
+
+    #[test]
+    fn clear_cookies_empties_the_jar() {
+        let e = cookie_engine(jar());
+        let n: i64 = e
+            .eval(
+                r#"set_cookie("https://api.test/", "a=1");
+                   clear_cookies();
+                   cookies("https://api.test/").len()"#,
+            )
+            .unwrap();
+        assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn a_missing_cookie_names_what_the_jar_has() {
+        let e = cookie_engine(jar());
+        let err = e
+            .eval::<String>(
+                r#"set_cookie("https://api.test/", "a=1");
+                   cookie("https://api.test/", "sid")"#,
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("no cookie `sid` for https://api.test/, jar has: a"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn set_cookie_reports_a_cookie_the_jar_refused() {
+        let e = cookie_engine(jar());
+        let err = e
+            .run(r#"set_cookie("https://api.test/", "sid=abc; Domain=other.test");"#)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("cookie `sid` was not stored for https://api.test/"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn set_cookie_rejects_a_value_without_a_name() {
+        let e = cookie_engine(jar());
+        let err = e
+            .run(r#"set_cookie("https://api.test/", "nonsense");"#)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("expected `name=value`"), "{err}");
+    }
+
+    #[test]
+    fn set_cookie_reports_a_bad_url() {
+        let e = cookie_engine(jar());
+        let err = e
+            .run(r#"set_cookie("not a url", "a=1");"#)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains(r#"bad URL "not a url""#), "{err}");
+    }
+
+    #[test]
+    fn a_disabled_jar_says_so() {
+        let e = cookie_engine(None);
+        for script in [
+            r#"cookie("https://api.test/", "a")"#,
+            r#"cookies("https://api.test/")"#,
+            r#"set_cookie("https://api.test/", "a=1")"#,
+            "clear_cookies()",
+        ] {
+            let err = e.eval::<Dynamic>(script).unwrap_err().to_string();
+            assert!(
+                err.contains("cookie jar is disabled for this test"),
+                "{script}: {err}"
+            );
+        }
+    }
+
+    fn pair(k: &str, v: &str) -> (String, String) {
+        (k.into(), v.into())
+    }
+
+    #[test]
+    fn set_cookie_value_reads_the_named_cookie() {
+        let headers = vec![
+            pair("Set-Cookie", "a=1; Path=/"),
+            pair("content-type", "text/plain"),
+            pair("set-cookie", "sid=abc; HttpOnly"),
+        ];
+        assert_eq!(set_cookie_value(&headers, "sid").unwrap(), "abc");
+        let err = set_cookie_value(&headers, "nope").unwrap_err();
+        assert_eq!(err, "no cookie `nope` in Set-Cookie, got: a, sid");
+    }
+
+    #[test]
+    fn set_cookie_value_with_no_cookies_says_none() {
+        let err = set_cookie_value(&[], "sid").unwrap_err();
+        assert_eq!(err, "no cookie `sid` in Set-Cookie, got: none");
+    }
+
+    #[test]
+    fn request_cookies_override_the_jar_by_name() {
+        let merged = merge_cookie_header(
+            vec![pair("sid", "old"), pair("lang", "en")],
+            &[pair("sid", "new"), pair("x", "1")],
+        );
+        assert_eq!(merged, "lang=en; sid=new; x=1");
     }
 
     #[test]
