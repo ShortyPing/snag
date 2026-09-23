@@ -8,15 +8,16 @@ description: Every function Snag registers into the Rhai engine — requests, re
 # Script API reference
 
 Everything Snag adds on top of the [Rhai](https://rhai.rs/book/) standard
-language. Each test gets a fresh engine, so nothing here carries state between
-tests.
+language. Each test gets a fresh engine and a fresh cookie jar, so nothing here
+carries state between tests.
 
 ## At a glance
 
 | Group | Functions |
 | --- | --- |
-| [Requests](#requests) | `get` `post` `put` `patch` `delete` `head` · `.header` `.bearer` `.body` `.json` · `.send` |
-| [Responses](#responses) | `.status` `.ok` `.text` `.duration_ms` · `.header(name)` `.json()` |
+| [Requests](#requests) | `get` `post` `put` `patch` `delete` `head` · `.header` `.bearer` `.cookie` `.body` `.json` · `.send` |
+| [Responses](#responses) | `.status` `.ok` `.text` `.duration_ms` · `.header(name)` `.cookie(name)` `.json()` |
+| [Cookies](#cookies) | `cookie(url, name)` `cookies(url)` `set_cookie(url, cookie)` `clear_cookies()` |
 | [JSON](#json) | `field(value, path)` · `parse_json(text)` |
 | [Assertions](#assertions) | `assert_status` `assert_ok` `assert_body_contains` `assert_faster_than` `assert_eq` `assert_contains` `assert` `fail` |
 | [Auth](#auth-helpers) | `basic(user, password)` |
@@ -50,6 +51,20 @@ Shorthand for `authorization: Bearer <token>`.
 ```js
 get(`${base_url}/me`).bearer(env("API_TOKEN"))
 ```
+
+### `.cookie(name, value)` → `Request`
+
+Sends a cookie with this request only. The jar is not changed. The cookie is
+added to whatever the jar already holds for the URL, and it replaces a jar
+cookie that has the same name.
+
+```js
+get(`${base_url}/beta`).cookie("feature", "on")
+```
+
+A raw `.header("cookie", …)` does **not** merge. `reqwest` leaves the jar out of
+any request that already carries a `Cookie` header, so that header is the only
+one sent.
 
 ### `.body(text)` → `Request`
 
@@ -85,9 +100,11 @@ DNS, connection refused, TLS, client timeout — fail the test with
 let res = get(`${base_url}/health`).send();
 ```
 
-The client is per test, and per attempt when retrying: no connection pool, no
-cookie jar, and no shared state between tests. Redirects follow `reqwest`'s
-defaults.
+The client is per test, and per attempt when retrying: no connection pool and
+no shared state between tests. Each attempt also gets its own
+[cookie jar](#cookies): `Set-Cookie` responses are stored in it, including those
+from redirect hops, and later requests in the same test send them back.
+Redirects follow `reqwest`'s defaults.
 
 ## Responses
 
@@ -107,6 +124,23 @@ throws, so an assertion produces the error rather than the lookup.
 assert_contains(res.header("content-type"), "application/json");
 ```
 
+### `res.cookie(name)` → `string`
+
+The value this response set for `name` in a `Set-Cookie` header. Attributes
+such as `Path` and `HttpOnly` are dropped. Unlike `res.header`, a missing cookie
+fails the test and lists what the response did set:
+
+```text
+no cookie `sid` in Set-Cookie, got: lang, csrf
+```
+
+```js
+let res = post(`${base_url}/login`).json(#{ user: "kim" }).send();
+let sid = res.cookie("sid");
+```
+
+This reads the response itself, so it works even with `cookies = false`.
+
 ### `res.json()` → value
 
 Parses `res.text` into Rhai values: JSON objects become maps, arrays become
@@ -120,6 +154,69 @@ assert_eq(body.status, "ok");
 
 Assert the status *before* decoding: a 502 with an HTML error page produces a
 much clearer failure that way.
+
+## Cookies
+
+Each test attempt has one cookie jar. Setup scripts, `fn setup()`, the test
+body, `fn teardown()`, teardown scripts and `on_teardown` callbacks all share
+it. A retry starts with an empty jar, and no two tests ever share one. See
+[Cookies and sessions](../guides/cookies-and-sessions.mdx) for the patterns.
+
+When the manifest sets [`cookies = false`](./manifest.mdx#top-level), the test
+has no jar. Every function in this section then fails with:
+
+```text
+cookie jar is disabled for this test (cookies = false in the manifest)
+```
+
+URLs must be absolute. A malformed one fails with `bad URL "<url>": <reason>`.
+
+### `cookie(url, name)` → `string`
+
+The value the jar would send to `url` for `name`. A missing cookie fails and
+names what the jar does hold for that URL:
+
+```text
+no cookie `sid` for https://api.test/, jar has: lang
+```
+
+```js
+assert_eq(cookie(base_url, "sid"), "abc123");
+```
+
+### `cookies(url)` → map
+
+Every cookie the jar would send to `url`, as a map from name to value. Use this
+one to check whether a cookie exists, because `cookie()` fails when it does not:
+
+```js
+assert("sid" in cookies(base_url), "expected to be logged in");
+assert_eq(cookies(base_url).len(), 0);
+```
+
+### `set_cookie(url, cookie)`
+
+Stores a cookie as if `url` had answered with `Set-Cookie: <cookie>`.
+Attributes such as `Path`, `Domain`, `Secure` and `Max-Age` apply as usual.
+
+```js
+set_cookie(base_url, "sid=abc123; Path=/");
+```
+
+The jar ignores a cookie whose attributes do not fit the URL, for example a
+`Domain` for another host or `Secure` on `http://`. `set_cookie` checks that the
+cookie was stored and fails if it was not:
+
+```text
+cookie `sid` was not stored for https://api.test/: domain, path or Secure does not match
+```
+
+A value without a `name=` part fails with ``bad cookie "…": expected `name=value` ``.
+
+### `clear_cookies()`
+
+Empties the jar. Useful for checking what a logged-out client sees partway
+through a test.
 
 ## JSON
 
@@ -459,6 +556,6 @@ a `let` first if you need a mutable version.
 
 Rhai is used with its standard package, and Snag adds only the functions above.
 There is no filesystem access, no process spawning, no socket API beyond the
-HTTP builders, no cookie jar, no WebSocket support, and no shared state between
-tests. Setup and teardown scripts share a scope with the test that pulled them
+HTTP builders, no WebSocket support, and no shared state between tests. Cookies
+are kept per test attempt only. Setup and teardown scripts share a scope with the test that pulled them
 in, but nothing crosses from one test to another.
