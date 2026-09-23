@@ -1,7 +1,8 @@
 use base64::Engine as Base64Engine;
 use base64::prelude::BASE64_STANDARD;
+use cookie_store::RawCookie;
 use reqwest::Url;
-use reqwest::cookie::{CookieStore, Jar};
+use reqwest::cookie::CookieStore;
 use reqwest::header::HeaderValue;
 use rhai::serde::{from_dynamic, to_dynamic};
 use rhai::{Dynamic, Engine, EvalAltResult, FnPtr, Map};
@@ -55,26 +56,63 @@ pub fn register_teardown(engine: &mut Engine, queue: TeardownQueue) {
     });
 }
 
-// reqwest's Jar can't be emptied, and the client owns its Arc so it can't be
-// swapped out either; clear_cookies() replaces the Jar behind this lock instead.
+// cookie_store directly rather than reqwest's Jar: Jar can only be asked what
+// it would send to one URL, and print_cookies() needs the whole store.
 #[derive(Default)]
-pub struct CookieJar(RwLock<Jar>);
+pub struct CookieJar(RwLock<cookie_store::CookieStore>);
 
 impl CookieJar {
+    // Stores `cookie` as if `url` had sent it; one the store rejects is dropped.
+    fn add(&self, cookie: &str, url: &Url) {
+        if let (Ok(raw), Ok(mut store)) = (RawCookie::parse(cookie), self.0.write()) {
+            store.store_response_cookies(std::iter::once(raw.into_owned()), url);
+        }
+    }
+
     fn clear(&self) {
-        if let Ok(mut jar) = self.0.write() {
-            *jar = Jar::default();
+        if let Ok(mut store) = self.0.write() {
+            store.clear();
         }
     }
 
     // What the jar would send to `url`, as name/value pairs.
     fn pairs(&self, url: &Url) -> Vec<(String, String)> {
-        let header = self.cookies(url);
-        let text = header.as_ref().and_then(|h| h.to_str().ok()).unwrap_or("");
-        text.split(';')
-            .filter_map(|pair| {
-                let (name, value) = pair.trim().split_once('=')?;
-                Some((name.to_string(), value.to_string()))
+        let Ok(store) = self.0.read() else {
+            return vec![];
+        };
+        store
+            .get_request_values(url)
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    // Every unexpired cookie as `name=value (domain d, path p)`, sorted so
+    // output is stable across runs.
+    fn describe(&self) -> Vec<String> {
+        let Ok(store) = self.0.read() else {
+            return vec![];
+        };
+        let mut all: Vec<(String, String, String, String)> = store
+            .iter_unexpired()
+            .map(|c| {
+                let domain = c
+                    .domain
+                    .as_cow()
+                    .map(|d| d.into_owned())
+                    .unwrap_or_default();
+                let path: &str = c.path.as_ref();
+                (
+                    domain,
+                    path.to_string(),
+                    c.name().to_string(),
+                    c.value().to_string(),
+                )
+            })
+            .collect();
+        all.sort();
+        all.into_iter()
+            .map(|(domain, path, name, value)| {
+                format!("{name}={value} (domain {domain}, path {path})")
             })
             .collect()
     }
@@ -82,13 +120,21 @@ impl CookieJar {
 
 impl CookieStore for CookieJar {
     fn set_cookies(&self, cookie_headers: &mut dyn Iterator<Item = &HeaderValue>, url: &Url) {
-        if let Ok(jar) = self.0.read() {
-            jar.set_cookies(cookie_headers, url);
+        let cookies = cookie_headers.filter_map(|h| {
+            let text = h.to_str().ok()?;
+            RawCookie::parse(text).ok().map(RawCookie::into_owned)
+        });
+        if let Ok(mut store) = self.0.write() {
+            store.store_response_cookies(cookies, url);
         }
     }
 
     fn cookies(&self, url: &Url) -> Option<HeaderValue> {
-        self.0.read().ok()?.cookies(url)
+        let header = merge_cookie_header(self.pairs(url), &[]);
+        if header.is_empty() {
+            return None;
+        }
+        HeaderValue::from_str(&header).ok()
     }
 }
 
@@ -286,11 +332,8 @@ pub fn register_cookies(engine: &mut Engine, jar: Option<Arc<CookieJar>>) {
                 .map(|(k, _)| k.trim())
                 .filter(|k| !k.is_empty())
                 .ok_or_else(|| format!("bad cookie {cookie:?}: expected `name=value`"))?;
-            jar.0
-                .read()
-                .map_err(|_| "cookie jar is poisoned")?
-                .add_cookie_str(cookie, &parsed);
-            // add_cookie_str drops a cookie it won't store without a word.
+            jar.add(cookie, &parsed);
+            // The store drops a cookie that doesn't fit the URL without a word.
             if jar.pairs(&parsed).iter().any(|(k, _)| k == name) {
                 return Ok(());
             }
@@ -321,7 +364,7 @@ fn parse_url(url: &str) -> Result<Url, Box<EvalAltResult>> {
 }
 
 // Routes print/debug and print_response into the sink instead of stdout.
-pub fn register_debug(engine: &mut Engine, sink: OutputSink) {
+pub fn register_debug(engine: &mut Engine, sink: OutputSink, jar: Option<Arc<CookieJar>>) {
     let s = sink.clone();
     engine.on_print(move |text| push(&s, text));
 
@@ -341,6 +384,21 @@ pub fn register_debug(engine: &mut Engine, sink: OutputSink) {
             push(&s, format!("  {line}"));
         }
     });
+
+    let s = sink.clone();
+    engine.register_fn(
+        "print_cookies",
+        move || -> Result<(), Box<EvalAltResult>> {
+            let lines = enabled(jar.as_deref())?.describe();
+            if lines.is_empty() {
+                push(&s, "(no cookies)");
+            }
+            for line in lines {
+                push(&s, line);
+            }
+            Ok(())
+        },
+    );
 }
 
 pub fn register_assertions(engine: &mut Engine) {
@@ -585,7 +643,7 @@ mod tests {
     fn print_is_captured_not_printed() {
         let mut e = engine();
         let sink = new_sink();
-        register_debug(&mut e, sink.clone());
+        register_debug(&mut e, sink.clone(), None);
         e.run(r#"print("hello");"#).unwrap();
         assert_eq!(sink.lock().unwrap().as_slice(), ["hello".to_string()]);
     }
@@ -712,6 +770,50 @@ mod tests {
                 "{script}: {err}"
             );
         }
+    }
+
+    fn print_cookies_output(script: &str, jar: Option<Arc<CookieJar>>) -> Vec<String> {
+        let mut e = cookie_engine(jar.clone());
+        let sink = new_sink();
+        register_debug(&mut e, sink.clone(), jar);
+        e.run(script).unwrap();
+        sink.lock().unwrap().clone()
+    }
+
+    #[test]
+    fn print_cookies_lists_every_domain_sorted() {
+        let out = print_cookies_output(
+            r#"set_cookie("https://b.test/", "z=1");
+               set_cookie("https://a.test/admin", "sid=abc; Path=/admin");
+               set_cookie("https://a.test/", "lang=en");
+               print_cookies();"#,
+            jar(),
+        );
+        assert_eq!(
+            out,
+            [
+                "lang=en (domain a.test, path /)",
+                "sid=abc (domain a.test, path /admin)",
+                "z=1 (domain b.test, path /)",
+            ]
+        );
+    }
+
+    #[test]
+    fn print_cookies_on_an_empty_jar_says_so() {
+        let out = print_cookies_output("print_cookies();", jar());
+        assert_eq!(out, ["(no cookies)"]);
+    }
+
+    #[test]
+    fn print_cookies_without_a_jar_says_it_is_disabled() {
+        let mut e = cookie_engine(None);
+        register_debug(&mut e, new_sink(), None);
+        let err = e.run("print_cookies();").unwrap_err().to_string();
+        assert!(
+            err.contains("cookie jar is disabled for this test"),
+            "{err}"
+        );
     }
 
     fn pair(k: &str, v: &str) -> (String, String) {

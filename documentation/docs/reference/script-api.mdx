@@ -22,7 +22,7 @@ carries state between tests.
 | [Assertions](#assertions) | `assert_status` `assert_ok` `assert_body_contains` `assert_faster_than` `assert_eq` `assert_contains` `assert` `fail` |
 | [Auth](#auth-helpers) | `basic(user, password)` |
 | [Environment](#environment) | `env` `env_or` |
-| [Output](#output) | `print` `debug` `print_response` |
+| [Output](#output) | `print` `debug` `print_response` `print_cookies` |
 | [Timing](#timing) | `sleep_ms` |
 | [Lifecycle](#lifecycle) | `fn setup` `fn teardown` · `on_teardown(cb)` `on_teardown(cb, always)` |
 
@@ -212,6 +212,10 @@ cookie `sid` was not stored for https://api.test/: domain, path or Secure does n
 ```
 
 A value without a `name=` part fails with ``bad cookie "…": expected `name=value` ``.
+
+### `print_cookies()`
+
+Writes the whole jar to the test's output. See [Output](#print_cookies).
 
 ### `clear_cookies()`
 
@@ -420,6 +424,24 @@ body:
 
 Handy while writing a test; think twice before committing it, since response
 headers and bodies can carry secrets into a published CI artifact.
+
+### `print_cookies()`
+
+Dumps every unexpired cookie in the test's [cookie jar](#cookies), one per line,
+sorted by domain, then path, then name. Unlike `cookies(url)`, this is not
+limited to one URL:
+
+```
+lang=en (domain example.com, path /)
+sid=abc123 (domain example.com, path /)
+```
+
+An empty jar prints `(no cookies)`. With `cookies = false` it fails, like the
+other jar functions, with
+`cookie jar is disabled for this test (cookies = false in the manifest)`.
+
+The same caution applies as for `print_response`: session cookies are
+credentials.
 
 ## Timing
 

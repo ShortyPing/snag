@@ -1533,6 +1533,7 @@ dependencies = [
  "base64 0.22.1",
  "clap",
  "clap_complete",
+ "cookie_store",
  "glob",
  "humantime",
  "humantime-serde",

@@ -258,14 +258,15 @@ and `check`'s `compile()`:
 | --- | --- |
 | `register_http` | `Request`/`Response` types, the six verbs, builder methods, `send`, response accessors, `field`, `basic` |
 | `register_cookies` | `cookie(url, name)`, `cookies`, `set_cookie`, `clear_cookies`, all against the per-test jar |
-| `register_debug` | `on_print` / `on_debug` hooks and `print_response`, all writing into the sink |
+| `register_debug` | `on_print` / `on_debug` hooks, `print_response` and `print_cookies`, all writing into the sink |
 | `register_assertions` | Every `assert_*` function |
 | `register_env` | `env`, `env_or`, `sleep_ms`, `fail` |
 | `register_teardown` | Both `on_teardown` overloads, pushing onto the per-test queue |
 
-`CookieJar` wraps `reqwest::cookie::Jar` in an `RwLock`. The wrapper exists
-because `Jar` has no clear method and the client holds its `Arc`, so
-`clear_cookies()` swaps in a new `Jar` behind the lock. `check` passes `None`
+`CookieJar` wraps a `cookie_store::CookieStore` in an `RwLock` and implements
+reqwest's `CookieStore` trait itself. It does not use `reqwest::cookie::Jar`,
+because `Jar` can only report what it would send to a single URL, and
+`print_cookies()` needs to list the whole store. `check` passes `None`
 for the jar, so the functions still resolve there.
 
 `OutputSink` is an `Arc<Mutex<Vec<String>>>` created per test, which is how

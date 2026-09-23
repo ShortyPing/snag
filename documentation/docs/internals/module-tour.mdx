@@ -156,11 +156,11 @@ The script-visible surface.
 | `OutputSink` | `Arc<Mutex<Vec<String>>>`, one per test |
 | `new_sink()` / `push()` | Create and append, ignoring a poisoned lock |
 | `ReqBuilder` | Method, URL, headers, per-request cookies, optional body, a cloned client and the jar |
-| `CookieJar` | `RwLock<reqwest::cookie::Jar>`, so `clear_cookies()` can swap in an empty `Jar` |
+| `CookieJar` | `RwLock<cookie_store::CookieStore>` implementing reqwest's `CookieStore`; not `Jar`, which cannot list its contents |
 | `Response` | Status, text, headers, duration |
 | `register_http()` | Verbs, builder methods, `send`, accessors, `field`, `basic` |
 | `register_cookies()` | `cookie`, `cookies`, `set_cookie`, `clear_cookies`; `None` jar means `cookies = false` |
-| `register_debug()` | `on_print`, `on_debug`, `print_response` |
+| `register_debug()` | `on_print`, `on_debug`, `print_response`, `print_cookies` |
 | `register_assertions()` | Every `assert_*`; `eq_result()` builds the message |
 | `register_env()` | `env`, `env_or`, `sleep_ms`, `fail` |
 | `register_teardown()` | Both `on_teardown` overloads, pushing onto the queue |
@@ -193,6 +193,7 @@ Builder methods take `ReqBuilder` **by value** and return it, which is what make
 | `regex` | `--regex` filters, via `RegexSet` |
 | `glob` + `walkdir` | Path expansion and directory walking |
 | `base64` | `basic()` |
+| `cookie_store` | Backs `CookieJar`; the same version reqwest's `cookies` feature pulls in |
 
 ## `src/revision.rs`
 

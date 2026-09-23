@@ -20,8 +20,8 @@ real run) and `runner::compile()` (for `snag check`):
 ```rust
 let mut engine = Engine::new();
 register_http(&mut engine, client, jar.clone());
-register_cookies(&mut engine, jar);
-register_debug(&mut engine, sink.clone());
+register_cookies(&mut engine, jar.clone());
+register_debug(&mut engine, sink.clone(), jar);
 register_assertions(&mut engine);
 register_env(&mut engine);
 register_teardown(&mut engine, teardowns.clone());
@@ -176,7 +176,7 @@ Only `register_debug` holds the `OutputSink`. To add a function that prints,
 register it there and clone the sink into the closure:
 
 ```rust
-pub fn register_debug(engine: &mut Engine, sink: OutputSink) {
+pub fn register_debug(engine: &mut Engine, sink: OutputSink, jar: Option<Arc<CookieJar>>) {
     // …existing hooks…
 
     let s = sink.clone();

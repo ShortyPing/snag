@@ -97,7 +97,7 @@ fn compile(test: &Test) -> anyhow::Result<()> {
     let mut engine = Engine::new();
     register_http(&mut engine, Client::new(), None);
     register_cookies(&mut engine, None);
-    register_debug(&mut engine, new_sink());
+    register_debug(&mut engine, new_sink(), None);
     register_assertions(&mut engine);
     register_env(&mut engine);
     register_teardown(&mut engine, new_teardown_queue());
@@ -293,8 +293,8 @@ fn execute_once(test: &Test, timeout: Option<Duration>, sink: &OutputSink) -> Re
 
     let mut engine = Engine::new();
     register_http(&mut engine, client, jar.clone());
-    register_cookies(&mut engine, jar);
-    register_debug(&mut engine, sink.clone());
+    register_cookies(&mut engine, jar.clone());
+    register_debug(&mut engine, sink.clone(), jar);
     register_assertions(&mut engine);
     register_env(&mut engine);
     register_teardown(&mut engine, teardowns.clone());

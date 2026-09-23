@@ -4,6 +4,7 @@ set_cookie(`${base_url}/`, "lang=en");
 
 assert_eq(cookie(`${base_url}/account`, "sid"), "abc123");
 assert_eq(cookies(base_url).len(), 2);
+print_cookies();
 
 clear_cookies();
 assert_eq(cookies(base_url).len(), 0);

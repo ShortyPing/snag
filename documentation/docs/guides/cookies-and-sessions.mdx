@@ -70,6 +70,19 @@ test's result depend on another's.
 | What the jar will send to a URL | `cookie(base_url, "sid")` |
 | Whether a cookie exists at all | `"sid" in cookies(base_url)` |
 
+To see everything the jar holds, for every domain, call `print_cookies()`. Run
+with `-v` to see the output:
+
+```console
+$ snag demo/suite.toml --filter cookies -v
+running 1 test across 1 suite
+PASS cookie jar, no network [3ms]
+    | lang=en (domain example.com, path /)
+    | sid=abc123 (domain example.com, path /)
+
+test result: ok. 1 passed; 0 failed; 0 timed out; 0 skipped; finished in 3ms
+```
+
 `res.cookie()` and `cookie()` fail the test when the cookie is missing, and the
 message says what *was* there. Use `cookies()` when a missing cookie is an
 acceptable outcome.
@@ -143,8 +156,8 @@ cookies = true           # ... except this one
 
 Without a jar, `Set-Cookie` headers are ignored. `res.cookie()` and
 `.cookie(name, value)` still work, because they read the response or change
-only the request. `cookie`, `cookies`, `set_cookie` and `clear_cookies` fail
-and say the jar is disabled.
+only the request. `cookie`, `cookies`, `set_cookie`, `print_cookies` and
+`clear_cookies` fail and say the jar is disabled.
 
 ## See also
 
