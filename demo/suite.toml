@@ -39,3 +39,9 @@ file = "./assertions_test.snag"
 # TOML types are preserved: integers, booleans, and arrays arrive as-is.
 max_latency_ms = 800
 retries = [1, 2, 3]
+
+[[test]]
+id = "cookies"
+name = "cookie jar, no network"
+tags = ["fast"]
+file = "./cookies_test.snag"

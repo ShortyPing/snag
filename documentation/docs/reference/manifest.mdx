@@ -35,6 +35,7 @@ currency = "USD"
 | --- | --- | --- | --- |
 | `title` | string | `"Untitled suite"` | Suite label. Appears in reports — JUnit `classname`, TeamCity suite name, the JSON `suite` field |
 | `timeout` | duration string | none | Default per-test timeout for this file |
+| `cookies` | bool | `true` | `false` gives each test no [cookie jar](./script-api.mdx#cookies) |
 | `variables` | table of string → [any TOML value](#variables) | `{}` | Variables shared by every test in the file |
 | `setup` | [hook](#hooks) | none | Script(s) run before every test in the file |
 | `teardown` | [hook](#hooks) | none | Script(s) run after every test in the file |
@@ -52,6 +53,7 @@ An empty manifest is valid and contributes zero tests.
 | `tags` | array of strings | no | `[]` | Selection tags, matched exactly by `-t` |
 | `timeout` | duration string | no | the suite `timeout` | Per-test timeout |
 | `parallel_safe` | bool | no | `true` | `false` pins the test to the serial phase |
+| `cookies` | bool | no | the suite `cookies` | Turns this test's cookie jar on or off |
 | `variables` | table of string → [any TOML value](#variables) | no | `{}` | Overrides of suite variables, for this test only |
 | `setup` | [hook](#hooks) | no | none | Script(s) run before this test, after the suite's `setup` |
 | `teardown` | [hook](#hooks) | no | none | Script(s) run after this test, before the suite's `teardown` |
@@ -196,6 +198,13 @@ Each step overrides the one before it whatever its value, so `--timeout 60s`
 **Parallelism** — `parallel_safe = false` always means the serial phase; `-j`
 only sizes the pool for the parallel phase.
 
+**Cookies** — the test's `cookies` wins over the suite's. If neither is set, the
+test gets a jar:
+
+```
+true  →  suite cookies  →  test cookies
+```
+
 ## Resolved test
 
 What the runner sees after a manifest is loaded, one per `[[test]]`:
@@ -207,6 +216,7 @@ What the runner sees after a manifest is loaded, one per `[[test]]`:
 | `tags` | `tags` |
 | `timeout` | test `timeout`, else suite `timeout` |
 | `parallel_safe` | `parallel_safe`, else `true` |
+| `cookies` | test `cookies`, else suite `cookies`, else `true` |
 | `script` | `file`, joined to the manifest's directory and normalised |
 | `vars` | suite `variables` merged with test `variables`, TOML types preserved |
 | `setup` | suite `setup` followed by test `setup`, paths resolved |

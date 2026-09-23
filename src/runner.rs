@@ -11,8 +11,8 @@ use crate::discovery::discover;
 use crate::manifest::{Hook, Test};
 use crate::report::{Multi, Outcome, Reporter, Status, Summary, reporter_for};
 use crate::scripting_registration::{
-    OutputSink, TeardownQueue, new_sink, new_teardown_queue, register_assertions, register_debug,
-    register_env, register_http, register_teardown,
+    CookieJar, OutputSink, TeardownQueue, new_sink, new_teardown_queue, register_assertions,
+    register_cookies, register_debug, register_env, register_http, register_teardown,
 };
 use crate::{Ctx, Exit, Format, RunArgs};
 
@@ -95,8 +95,9 @@ pub fn check(ctx: &Ctx, tests: &[Test]) -> anyhow::Result<Exit> {
 
 fn compile(test: &Test) -> anyhow::Result<()> {
     let mut engine = Engine::new();
-    register_http(&mut engine, Client::new());
-    register_debug(&mut engine, new_sink());
+    register_http(&mut engine, Client::new(), None);
+    register_cookies(&mut engine, None);
+    register_debug(&mut engine, new_sink(), None);
     register_assertions(&mut engine);
     register_env(&mut engine);
     register_teardown(&mut engine, new_teardown_queue());
@@ -278,6 +279,11 @@ fn execute_once(test: &Test, timeout: Option<Duration>, sink: &OutputSink) -> Re
     if let Some(t) = timeout {
         builder = builder.timeout(t);
     }
+    // Built per attempt, so a retry never sees the failed attempt's session.
+    let jar = test.cookies.then(|| Arc::new(CookieJar::default()));
+    if let Some(jar) = &jar {
+        builder = builder.cookie_provider(jar.clone());
+    }
     let client = match builder.build() {
         Ok(c) => c,
         Err(e) => return Err(Failure::Error(format!("building HTTP client: {e}"))),
@@ -286,8 +292,9 @@ fn execute_once(test: &Test, timeout: Option<Duration>, sink: &OutputSink) -> Re
     let teardowns = new_teardown_queue();
 
     let mut engine = Engine::new();
-    register_http(&mut engine, client);
-    register_debug(&mut engine, sink.clone());
+    register_http(&mut engine, client, jar.clone());
+    register_cookies(&mut engine, jar.clone());
+    register_debug(&mut engine, sink.clone(), jar);
     register_assertions(&mut engine);
     register_env(&mut engine);
     register_teardown(&mut engine, teardowns.clone());
@@ -552,6 +559,7 @@ mod tests {
             tags: vec![],
             timeout: None,
             parallel_safe: true,
+            cookies: true,
             script: PathBuf::from("t.snag"),
             vars: BTreeMap::new(),
             setup: vec![],
@@ -1134,6 +1142,75 @@ throw "boom";
 
         assert_eq!(outcome.status, Status::TimedOut);
         assert_eq!(outcome.output, ["cleaned up"]);
+    }
+
+    #[test]
+    fn setup_body_and_teardown_share_one_cookie_jar() {
+        let setup = script(
+            "cookie_setup.snag",
+            r#"set_cookie("https://api.test/", "sid=abc");"#,
+        );
+        let body = script(
+            "cookie_body.snag",
+            r#"print(cookie("https://api.test/", "sid"));
+               set_cookie("https://api.test/", "lang=en");"#,
+        );
+        let teardown = script(
+            "cookie_teardown.snag",
+            r#"print(cookies("https://api.test/").len());"#,
+        );
+
+        let test = Test {
+            setup: vec![hook(setup, true)],
+            teardown: vec![hook(teardown, true)],
+            ..with_script("t0", body)
+        };
+        let outcome = run_one(test);
+
+        assert_eq!(outcome.status, Status::Passed, "{:?}", outcome.message);
+        assert_eq!(outcome.output, ["abc", "2"]);
+    }
+
+    #[test]
+    fn a_retry_starts_with_an_empty_cookie_jar() {
+        let body = script(
+            "cookie_retry.snag",
+            r#"print(cookies("https://api.test/").len());
+               set_cookie("https://api.test/", "sid=abc");
+               fail("again");"#,
+        );
+        let tests = vec![with_script("t0", body)];
+
+        let mut args = args();
+        args.retries = 1;
+
+        let (result, _, recorder) = batch(&tests, &args, 1, &AtomicBool::new(false));
+
+        assert!(result.is_ok());
+        let outcome = &recorder.finished[0];
+        assert_eq!(outcome.attempts, 2);
+        // Output is the last attempt's: the first attempt's cookie is gone.
+        assert_eq!(outcome.output, ["0"]);
+    }
+
+    #[test]
+    fn a_test_with_cookies_off_has_no_jar() {
+        let body = script(
+            "cookie_disabled.snag",
+            r#"set_cookie("https://api.test/", "sid=abc");"#,
+        );
+        let test = Test {
+            cookies: false,
+            ..with_script("t0", body)
+        };
+        let outcome = run_one(test);
+
+        assert_eq!(outcome.status, Status::Failed);
+        let message = outcome.message.unwrap_or_default();
+        assert!(
+            message.contains("cookie jar is disabled for this test"),
+            "{message}"
+        );
     }
 
     #[test]

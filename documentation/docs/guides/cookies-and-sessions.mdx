@@ -1,0 +1,166 @@
+---
+id: cookies-and-sessions
+title: Cookies and sessions
+sidebar_position: 3.5
+description: The per-test cookie jar, logging in during setup, checking logged-out behaviour, and turning the jar off.
+---
+
+# Cookies and sessions
+
+Every test attempt gets its own cookie jar. It works like a browser's: when a
+response includes `Set-Cookie`, the cookie is stored, and later requests to a
+matching URL send it back. This includes cookies set on redirect hops. A
+session-based API needs no extra code:
+
+```js
+post(`${base_url}/login`).json(#{ user: "kim", password: env("PASSWORD") }).send();
+
+// The session cookie from /login goes out automatically.
+let me = get(`${base_url}/me`).send();
+assert_status(me, 200);
+```
+
+## What shares a jar
+
+One jar covers everything that runs for **one attempt of one test**:
+
+- setup scripts from the manifest, suite and test
+- `fn setup()` and `fn teardown()` in the test script
+- the test body
+- teardown scripts and `on_teardown` callbacks
+
+Tests never share a jar, even within one suite, and a [retry](./execution-model.mdx)
+starts with an empty one. Cookies cannot leak from one test to another, so the
+order tests run in does not matter.
+
+## Logging in during setup
+
+Because setup and the test share a jar, you can put the login in a setup
+script and write the test as if it were already logged in:
+
+```toml
+setup = "./login.snag"
+
+[[test]]
+id = "profile"
+file = "./profile.snag"
+```
+
+```js
+// login.snag
+let res = post(`${base_url}/login`).json(#{ user: "kim", password: env("PASSWORD") }).send();
+assert_status(res, 204);
+assert("sid" in cookies(base_url), "login did not set a session cookie");
+
+on_teardown(|| post(`${base_url}/logout`).send());
+```
+
+The logout callback runs after the test, whether it passed or failed, and sends
+the same session cookie. The [setup and teardown guide](./setup-and-teardown.mdx)
+covers ordering in detail.
+
+Each test logs in again. This is deliberate: a shared session would make one
+test's result depend on another's.
+
+## Reading cookies
+
+| You want | Use |
+| --- | --- |
+| What this response set | `res.cookie("sid")` |
+| What the jar will send to a URL | `cookie(base_url, "sid")` |
+| Whether a cookie exists at all | `"sid" in cookies(base_url)` |
+
+To see everything the jar holds, for every domain, call `print_cookies()`. Run
+with `-v` to see the output:
+
+```console
+$ snag demo/suite.toml --filter cookies -v
+running 1 test across 1 suite
+PASS cookie jar, no network [3ms]
+    | lang=en (domain example.com, path /)
+    | sid=abc123 (domain example.com, path /)
+
+test result: ok. 1 passed; 0 failed; 0 timed out; 0 skipped; finished in 3ms
+```
+
+`res.cookie()` and `cookie()` fail the test when the cookie is missing, and the
+message says what *was* there. Use `cookies()` when a missing cookie is an
+acceptable outcome.
+
+```js
+let res = post(`${base_url}/login`).json(#{ user: "kim", password: "wrong" }).send();
+assert_status(res, 401);
+assert(!("sid" in cookies(base_url)), "a failed login must not start a session");
+```
+
+## Setting cookies by hand
+
+`set_cookie` stores a cookie as though the server had sent it. Use it for
+consent flags, feature toggles, or a session token taken from a variable:
+
+```js
+set_cookie(base_url, `sid=${env("SESSION")}; Path=/`);
+```
+
+The usual cookie rules apply. A cookie whose `Domain`, `Path` or `Secure` does
+not fit the URL is not stored, and `set_cookie` fails rather than dropping it
+quietly:
+
+```console
+$ snag suite.toml
+running 1 test across 1 suite
+FAIL session [21ms]
+
+failures:
+
+  session (suite.toml::session)
+    Runtime error: cookie `sid` was not stored for https://api.example.com: domain, path or Secure does not match (line 1, position 1)
+
+test result: FAILED. 0 passed; 1 failed; 0 timed out; 0 skipped; finished in 22ms
+```
+
+To send a cookie on one request without storing it, use `.cookie(name, value)`.
+It is added to the jar's cookies for that request, and it replaces a jar cookie
+with the same name:
+
+```js
+get(`${base_url}/beta`).cookie("feature", "on").send();
+```
+
+## Checking logged-out behaviour
+
+`clear_cookies()` empties the jar partway through a test:
+
+```js
+post(`${base_url}/login`).json(#{ user: "kim", password: env("PASSWORD") }).send();
+assert_status(get(`${base_url}/me`).send(), 200);
+
+clear_cookies();
+assert_status(get(`${base_url}/me`).send(), 401);
+```
+
+## Turning the jar off
+
+Set `cookies = false` for tests that must never send a cookie. For example, a
+check that an endpoint does not depend on a session. It can be set for the
+whole suite or for one test, and the test's setting wins:
+
+```toml
+cookies = false          # no jar for any test in this file ...
+
+[[test]]
+id = "login-flow"
+file = "./login_flow.snag"
+cookies = true           # ... except this one
+```
+
+Without a jar, `Set-Cookie` headers are ignored. `res.cookie()` and
+`.cookie(name, value)` still work, because they read the response or change
+only the request. `cookie`, `cookies`, `set_cookie`, `print_cookies` and
+`clear_cookies` fail and say the jar is disabled.
+
+## See also
+
+- [Script API: cookies](../reference/script-api.mdx#cookies)
+- [Manifest: `cookies`](../reference/manifest.mdx#top-level)
+- [Execution model](./execution-model.mdx)

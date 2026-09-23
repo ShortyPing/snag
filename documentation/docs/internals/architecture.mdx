@@ -189,8 +189,10 @@ rather than pretending it is deterministic.
 `execute()` wraps `execute_once()` in the retry loop, timing the whole thing and
 reporting `attempts`. `execute_once()`:
 
-1. Builds a `reqwest::blocking::Client`, applying the timeout if there is one.
-2. Builds a fresh `rhai::Engine` and runs all five `register_*` functions
+1. Builds a `reqwest::blocking::Client`, applying the timeout if there is one,
+   and, unless the test sets `cookies = false`, a fresh `CookieJar` as its
+   cookie provider.
+2. Builds a fresh `rhai::Engine` and runs all six `register_*` functions
    against it, handing `register_teardown` a fresh `on_teardown` queue.
 3. Installs an `on_progress` hook when a timeout applies: every
    `PROGRESS_INTERVAL` (2,000) operations it compares `Instant::now()` against
@@ -249,16 +251,23 @@ exit code is decided.
 
 ## `scripting_registration.rs` — the script surface
 
-Five registration functions, called in the same order by both `execute_once()`
+Six registration functions, called in the same order by both `execute_once()`
 and `check`'s `compile()`:
 
 | Function | Registers |
 | --- | --- |
 | `register_http` | `Request`/`Response` types, the six verbs, builder methods, `send`, response accessors, `field`, `basic` |
-| `register_debug` | `on_print` / `on_debug` hooks and `print_response`, all writing into the sink |
+| `register_cookies` | `cookie(url, name)`, `cookies`, `set_cookie`, `clear_cookies`, all against the per-test jar |
+| `register_debug` | `on_print` / `on_debug` hooks, `print_response` and `print_cookies`, all writing into the sink |
 | `register_assertions` | Every `assert_*` function |
 | `register_env` | `env`, `env_or`, `sleep_ms`, `fail` |
 | `register_teardown` | Both `on_teardown` overloads, pushing onto the per-test queue |
+
+`CookieJar` wraps a `cookie_store::CookieStore` in an `RwLock` and implements
+reqwest's `CookieStore` trait itself. It does not use `reqwest::cookie::Jar`,
+because `Jar` can only report what it would send to a single URL, and
+`print_cookies()` needs to list the whole store. `check` passes `None`
+for the jar, so the functions still resolve there.
 
 `OutputSink` is an `Arc<Mutex<Vec<String>>>` created per test, which is how
 captured output stays per test even under a worker pool. `register_debug` is the
