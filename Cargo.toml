@@ -9,11 +9,11 @@ anyhow = "1.0.104"
 clap_complete = "4.6.11"
 humantime = "2.4.0"
 serde = { version = "1.0.229", features = ["derive"] }
-toml = "1.1.6"
+toml = "1.1.8"
 humantime-serde = "1.1.1"
-rhai = { version = "1.26.1", features = ["serde_json", "serde"] }
+rhai = { version = "1.27.0", features = ["serde_json", "serde"] }
 reqwest = { version = "0.13.5", features = ["blocking"] }
-serde_json = "1.0.151"
+serde_json = "1.0.154"
 regex = "1.13.1"
 glob = "0.3.4"
 walkdir = "2.5.0"
