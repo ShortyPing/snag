@@ -94,7 +94,8 @@ construction the set `snag` runs.
 2. `walk_for_suites()` recurses with `walkdir`, skipping dot-directories and
    `target`, `node_modules`, `dist`, `build`, `.venv`, and not following
    symlinks. Only `suite.toml`, `snag.toml`, and `*.snag.toml` are collected.
-3. Each file goes through `manifest::load_suite()`.
+3. `manifest::load_env_files()` reads any `--env-file` once, then each file goes
+   through `manifest::load_suite()` with the result.
 4. `Filter` applies include, exclude, and tag rules — include and exclude match
    against both name and id, in substring or `RegexSet` mode.
 
@@ -110,7 +111,9 @@ ignored. Durations go through `humantime_serde`.
 
 - `name` falls back to `id`, `parallel_safe` to `true`
 - `timeout` falls back to the file-level timeout
-- suite variables are cloned and then extended with the test's, so test keys win;
+- suite variables are cloned, extended with the `--env-file` variables, and then
+  with the test's, so test keys win over the environment and the environment
+  over the suite;
   values are converted from TOML to JSON so the runner can hand them to Rhai
 - `script` is `manifest_dir.join(file)`, normalised to drop `.` components while
   leaving `..` alone — resolving `..` textually would be wrong through a symlink
@@ -189,8 +192,10 @@ rather than pretending it is deterministic.
 `execute()` wraps `execute_once()` in the retry loop, timing the whole thing and
 reporting `attempts`. `execute_once()`:
 
-1. Builds a `reqwest::blocking::Client`, applying the timeout if there is one.
-2. Builds a fresh `rhai::Engine` and runs all five `register_*` functions
+1. Builds a `reqwest::blocking::Client`, applying the timeout if there is one,
+   and, unless the test sets `cookies = false`, a fresh `CookieJar` as its
+   cookie provider.
+2. Builds a fresh `rhai::Engine` and runs all six `register_*` functions
    against it, handing `register_teardown` a fresh `on_teardown` queue.
 3. Installs an `on_progress` hook when a timeout applies: every
    `PROGRESS_INTERVAL` (2,000) operations it compares `Instant::now()` against
@@ -249,16 +254,23 @@ exit code is decided.
 
 ## `scripting_registration.rs` — the script surface
 
-Five registration functions, called in the same order by both `execute_once()`
+Six registration functions, called in the same order by both `execute_once()`
 and `check`'s `compile()`:
 
 | Function | Registers |
 | --- | --- |
 | `register_http` | `Request`/`Response` types, the six verbs, builder methods, `send`, response accessors, `field`, `basic` |
-| `register_debug` | `on_print` / `on_debug` hooks and `print_response`, all writing into the sink |
+| `register_cookies` | `cookie(url, name)`, `cookies`, `set_cookie`, `clear_cookies`, all against the per-test jar |
+| `register_debug` | `on_print` / `on_debug` hooks, `print_response` and `print_cookies`, all writing into the sink |
 | `register_assertions` | Every `assert_*` function |
 | `register_env` | `env`, `env_or`, `sleep_ms`, `fail` |
 | `register_teardown` | Both `on_teardown` overloads, pushing onto the per-test queue |
+
+`CookieJar` wraps a `cookie_store::CookieStore` in an `RwLock` and implements
+reqwest's `CookieStore` trait itself. It does not use `reqwest::cookie::Jar`,
+because `Jar` can only report what it would send to a single URL, and
+`print_cookies()` needs to list the whole store. `check` passes `None`
+for the jar, so the functions still resolve there.
 
 `OutputSink` is an `Arc<Mutex<Vec<String>>>` created per test, which is how
 captured output stays per test even under a worker pool. `register_debug` is the

@@ -72,9 +72,20 @@ Accepted by `run`, `list`, and `check`, with identical behaviour.
 | `-e`, `--exclude <SUBSTR>` | yes | Drop tests whose name or id contains this substring. Beats `--filter` |
 | `-t`, `--tag <TAG>` | yes | Keep tests carrying this exact tag. Multiple values are OR-ed |
 | `--regex` | no | Treat `--filter` and `--exclude` as regular expressions |
+| `--env-file <FILE>` | yes | Layer an [environment file](../guides/variables-and-secrets.mdx#environment-files)'s variables over every suite's `[variables]`. Later files win |
 
 Different option kinds are AND-ed; repeats of one option are OR-ed. See
 [selecting tests](../guides/selecting-tests.mdx).
+
+`--env-file` selects nothing — it sits here because all three commands load
+suites the same way, so `snag check --env-file env/prod.toml` validates the
+environment file too. The path is relative to the working directory, not to a
+suite. A file that is missing or does not parse aborts with exit code 2:
+
+```console
+$ snag suite.toml --env-file nope.toml
+Error: reading environment file nope.toml: No such file or directory (os error 2)
+```
 
 ## `snag run`
 
@@ -102,6 +113,7 @@ snag tests/ -t smoke                        # one tier
 snag run -j 4 --fail-fast                   # four workers, stop early
 snag tests/ --retries 2 --timeout 30s       # tolerate flakiness, bound each test
 snag tests/ -f junit --report report.xml    # human on stdout, XML in a file
+snag tests/ --env-file env/staging.toml     # same suites, staging values
 ```
 
 ### `--report` and `--format` together

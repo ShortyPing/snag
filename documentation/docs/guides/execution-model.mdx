@@ -57,9 +57,10 @@ snag run -j 0     # default: one worker per logical CPU
 ```
 
 The pool is a set of scoped threads pulling from a shared index. Each worker
-builds its **own** HTTP client and its **own** interpreter for every test, so
-nothing is shared between tests except the cancel flag: no cookie jar, no
-connection pool, no scope.
+builds its **own** HTTP client, cookie jar and interpreter for every test, so
+nothing is shared between tests except the cancel flag: no cookies, no
+connection pool, no scope. A retry builds all three again, so a second attempt
+never sees cookies left by the first.
 
 Worker count is clamped to the number of tests in the phase — asking for 32
 workers to run 2 tests spawns 2.

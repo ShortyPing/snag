@@ -174,7 +174,21 @@ services/
 
 ## Environments
 
-Variables are the seam. Two common approaches:
+Variables are the seam. Three common approaches:
+
+**One suite, one environment file per deployment** — values that differ live in
+their own TOML file, layered over the suite's `[variables]`:
+
+```toml title="env/staging.toml"
+[variables]
+base_url = "https://staging.api.example.com"
+```
+
+```bash
+snag tests/ --env-file env/staging.toml
+```
+
+See [environment files](./variables-and-secrets.mdx#environment-files).
 
 **One suite, environment from the process** — the script reads it:
 
