@@ -1,0 +1,4 @@
+# Layered over the suite's [variables] with `--env-file demo/env/staging.toml`.
+# A test's own [test.variables] still win.
+[variables]
+base_url = "https://example.org"

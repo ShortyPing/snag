@@ -94,7 +94,8 @@ construction the set `snag` runs.
 2. `walk_for_suites()` recurses with `walkdir`, skipping dot-directories and
    `target`, `node_modules`, `dist`, `build`, `.venv`, and not following
    symlinks. Only `suite.toml`, `snag.toml`, and `*.snag.toml` are collected.
-3. Each file goes through `manifest::load_suite()`.
+3. `manifest::load_env_files()` reads any `--env-file` once, then each file goes
+   through `manifest::load_suite()` with the result.
 4. `Filter` applies include, exclude, and tag rules — include and exclude match
    against both name and id, in substring or `RegexSet` mode.
 
@@ -110,7 +111,9 @@ ignored. Durations go through `humantime_serde`.
 
 - `name` falls back to `id`, `parallel_safe` to `true`
 - `timeout` falls back to the file-level timeout
-- suite variables are cloned and then extended with the test's, so test keys win;
+- suite variables are cloned, extended with the `--env-file` variables, and then
+  with the test's, so test keys win over the environment and the environment
+  over the suite;
   values are converted from TOML to JSON so the runner can hand them to Rhai
 - `script` is `manifest_dir.join(file)`, normalised to drop `.` components while
   leaving `..` alone — resolving `..` textually would be wrong through a symlink

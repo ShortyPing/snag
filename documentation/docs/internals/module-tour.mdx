@@ -73,6 +73,7 @@ Schema and resolution.
 | `Test` | The resolved form the rest of the crate uses |
 | `Test::qualified_id()` | `format!("{}::{}", suite_path.display(), id)` |
 | `load_suite()` | Read → parse → resolve, rejecting duplicate ids |
+| `load_env_files()` | Read `--env-file` files into one variable map, later files winning |
 | `normalize()` | Drops `.` components, leaves `..` alone |
 | `default_title()` | `"Untitled suite"` |
 

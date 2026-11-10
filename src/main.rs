@@ -93,6 +93,11 @@ pub struct SelectionArgs {
     /// Treat filters as regular expressions instead of substrings.
     #[arg(long)]
     pub regex: bool,
+
+    /// Environment file whose variables override the suite's (repeatable,
+    /// later files win).
+    #[arg(long, value_name = "FILE")]
+    pub env_file: Vec<PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -337,6 +342,7 @@ fn implicit_run<I: IntoIterator<Item = String>>(args: I) -> Vec<String> {
         "--tag",
         "-e",
         "--exclude",
+        "--env-file",
         "-j",
         "--jobs",
         "--timeout",
@@ -383,6 +389,7 @@ pub(crate) fn default_run() -> Command {
             tag: vec![],
             exclude: vec![],
             regex: false,
+            env_file: vec![],
         },
         jobs: 0,
         fail_fast: false,

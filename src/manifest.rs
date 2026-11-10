@@ -134,7 +134,36 @@ impl Test {
     }
 }
 
-pub fn load_suite(path: &Path) -> anyhow::Result<Vec<Test>> {
+// An environment file: the values that differ between deployments, kept out of
+// the suite so one manifest can be pointed at any of them.
+#[derive(Deserialize, Debug, Default)]
+#[serde(deny_unknown_fields)]
+struct EnvFile {
+    #[serde(default)]
+    variables: BTreeMap<String, toml::Value>,
+}
+
+pub type EnvVars = BTreeMap<String, toml::Value>;
+
+// Later files win, key by key, so a shared base can be layered under a
+// per-environment or per-developer file.
+pub fn load_env_files(paths: &[PathBuf]) -> anyhow::Result<EnvVars> {
+    let mut vars = EnvVars::new();
+
+    for path in paths {
+        let text = std::fs::read_to_string(path)
+            .with_context(|| format!("reading environment file {}", path.display()))?;
+
+        let file: EnvFile = toml::from_str(&text)
+            .with_context(|| format!("parsing environment file {}", path.display()))?;
+
+        vars.extend(file.variables);
+    }
+
+    Ok(vars)
+}
+
+pub fn load_suite(path: &Path, env: &EnvVars) -> anyhow::Result<Vec<Test>> {
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("reading suite {}", path.display()))?;
 
@@ -154,7 +183,10 @@ pub fn load_suite(path: &Path) -> anyhow::Result<Vec<Test>> {
             anyhow::bail!("duplicate test id `{}` in {}", def.id, path.display());
         }
 
+        // The environment sits between the two manifest levels: it retargets
+        // the suite's defaults, but a value a test pins for itself stays put.
         let mut merged = manifest.variables.clone();
+        merged.extend(env.clone());
         merged.extend(def.variables.clone());
         let mut vars = BTreeMap::new();
         for (name, value) in merged {
@@ -290,6 +322,10 @@ mod tests {
         path
     }
 
+    fn load(path: &Path) -> anyhow::Result<Vec<Test>> {
+        load_suite(path, &EnvVars::new())
+    }
+
     #[test]
     fn test_vars_override_suite_vars() {
         let path = write_temp(
@@ -307,7 +343,7 @@ file = "t.snag"
 base_url = "https://test"
 "#,
         );
-        let tests = load_suite(&path).unwrap();
+        let tests = load(&path).unwrap();
         assert_eq!(tests[0].vars["base_url"], "https://test");
         assert_eq!(tests[0].vars["shared"], "keep");
     }
@@ -333,7 +369,7 @@ id = "t"
 file = "t.snag"
 "#,
         );
-        let vars = &load_suite(&path).unwrap()[0].vars;
+        let vars = &load(&path).unwrap()[0].vars;
         assert_eq!(vars["max_latency_ms"], json!(800));
         assert_eq!(vars["ratio"], json!(0.5));
         assert_eq!(vars["flag"], json!(true));
@@ -359,7 +395,7 @@ file = "t.snag"
 name = "test"
 "#,
         );
-        let vars = &load_suite(&path).unwrap()[0].vars;
+        let vars = &load(&path).unwrap()[0].vars;
         // Per key, no deep merge: the suite's `role` does not survive.
         assert_eq!(vars["user"], json!({ "name": "test" }));
     }
@@ -377,7 +413,7 @@ id = "t"
 file = "t.snag"
 "#,
         );
-        let err = format!("{:#}", load_suite(&path).unwrap_err());
+        let err = format!("{:#}", load(&path).unwrap_err());
         assert!(err.contains("variable `x` in"), "{err}");
         assert!(err.contains("non-finite float"), "{err}");
     }
@@ -392,7 +428,7 @@ id = "t"
 file = "t.snag"
 "#,
         );
-        let tests = load_suite(&path).unwrap();
+        let tests = load(&path).unwrap();
         assert_eq!(tests[0].name, "t");
         assert!(tests[0].tags.is_empty());
         assert!(tests[0].parallel_safe);
@@ -417,7 +453,7 @@ file = "t.snag"
 cookies = true
 "#,
         );
-        let tests = load_suite(&path).unwrap();
+        let tests = load(&path).unwrap();
         assert!(
             !tests[0].cookies,
             "suite `cookies = false` should be inherited"
@@ -437,7 +473,7 @@ id = "t"
 file = "t.snag"
 "#,
         );
-        let err = format!("{:#}", load_suite(&path).unwrap_err());
+        let err = format!("{:#}", load(&path).unwrap_err());
         assert!(err.contains("unknown field `cookie`"), "{err}");
     }
 
@@ -451,7 +487,7 @@ id = "t"
 file = "./scripts/t.snag"
 "#,
         );
-        let tests = load_suite(&path).unwrap();
+        let tests = load(&path).unwrap();
         assert!(tests[0].script.ends_with("scripts/t.snag"));
     }
 
@@ -480,7 +516,7 @@ setup = ["./a.snag", "./b.snag"]
 teardown = { file = "./t_teardown.snag", always = false }
 "#,
         );
-        let tests = load_suite(&path).unwrap();
+        let tests = load(&path).unwrap();
         let setup: Vec<_> = tests[0]
             .setup
             .iter()
@@ -519,7 +555,7 @@ file = "t.snag"
 teardown = "./scripts/clean.snag"
 "#,
         );
-        let tests = load_suite(&path).unwrap();
+        let tests = load(&path).unwrap();
         assert!(tests[0].teardown[0].always);
         assert!(tests[0].teardown[0].script.ends_with("scripts/clean.snag"));
     }
@@ -535,7 +571,7 @@ file = "t.snag"
 setup = { file = "./s.snag", always = false }
 "#,
         );
-        let err = load_suite(&path).unwrap_err().to_string();
+        let err = load(&path).unwrap_err().to_string();
         assert!(err.contains("only valid on teardown"), "{err}");
     }
 
@@ -549,7 +585,7 @@ id = "t"
 file = "t.snag"
 "#,
         );
-        let tests = load_suite(&path).unwrap();
+        let tests = load(&path).unwrap();
         assert!(tests[0].setup.is_empty());
         assert!(tests[0].teardown.is_empty());
     }
@@ -568,7 +604,7 @@ id = "t"
 file = "b.snag"
 "#,
         );
-        assert!(load_suite(&path).is_err());
+        assert!(load(&path).is_err());
     }
 
     #[test]
@@ -588,8 +624,108 @@ file = "b.snag"
 timeout = "1s"
 "#,
         );
-        let tests = load_suite(&path).unwrap();
+        let tests = load(&path).unwrap();
         assert_eq!(tests[0].timeout, Some(Duration::from_secs(30)));
         assert_eq!(tests[1].timeout, Some(Duration::from_secs(1)));
+    }
+
+    const ENV_SUITE: &str = r#"
+[variables]
+base_url = "https://suite"
+shared = "keep"
+
+[[test]]
+id = "plain"
+file = "t.snag"
+
+[[test]]
+id = "pinned"
+file = "t.snag"
+[test.variables]
+base_url = "https://test"
+"#;
+
+    #[test]
+    fn env_file_overrides_suite_vars_but_not_test_vars() {
+        let suite = write_temp("env_suite.toml", ENV_SUITE);
+        let env = write_temp(
+            "env_staging.toml",
+            r#"
+[variables]
+base_url = "https://staging"
+tenant = "t-001"
+"#,
+        );
+        let env = load_env_files(&[env]).unwrap();
+        let tests = load_suite(&suite, &env).unwrap();
+
+        assert_eq!(tests[0].vars["base_url"], "https://staging");
+        assert_eq!(tests[0].vars["shared"], "keep");
+        assert_eq!(tests[0].vars["tenant"], "t-001");
+        assert_eq!(tests[1].vars["base_url"], "https://test");
+    }
+
+    #[test]
+    fn later_env_files_win_key_by_key() {
+        let base = write_temp(
+            "env_layer_base.toml",
+            r#"
+[variables]
+base_url = "https://base"
+region = "eu"
+max_latency_ms = 800
+"#,
+        );
+        let over = write_temp(
+            "env_layer_over.toml",
+            r#"
+[variables]
+base_url = "https://over"
+"#,
+        );
+        let env = load_env_files(&[base, over]).unwrap();
+        assert_eq!(env["base_url"].as_str(), Some("https://over"));
+        assert_eq!(env["region"].as_str(), Some("eu"));
+        assert_eq!(env["max_latency_ms"].as_integer(), Some(800));
+    }
+
+    #[test]
+    fn no_env_files_means_no_env_vars() {
+        assert!(load_env_files(&[]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn an_env_file_without_variables_is_empty() {
+        let env = write_temp("env_empty.toml", "");
+        assert!(load_env_files(&[env]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_missing_env_file_names_the_path() {
+        let dir = std::env::temp_dir().join(format!("snag-manifest-{}", std::process::id()));
+        let missing = dir.join("env_does_not_exist.toml");
+        let err = format!("{:#}", load_env_files(&[missing]).unwrap_err());
+        assert!(err.contains("reading environment file"), "{err}");
+        assert!(err.contains("env_does_not_exist.toml"), "{err}");
+    }
+
+    #[test]
+    fn top_level_keys_in_an_env_file_are_rejected() {
+        // Variables go under [variables], as in a suite; a bare key is most
+        // likely a variable in the wrong place, so say so instead of dropping it.
+        let env = write_temp("env_flat.toml", "base_url = \"https://x\"\n");
+        let err = format!("{:#}", load_env_files(&[env]).unwrap_err());
+        assert!(err.contains("parsing environment file"), "{err}");
+        assert!(err.contains("unknown field `base_url`"), "{err}");
+    }
+
+    #[test]
+    fn non_finite_float_from_an_env_file_is_rejected() {
+        let suite = write_temp("env_nonfinite_suite.toml", ENV_SUITE);
+        let env = write_temp("env_nonfinite.toml", "[variables]\nx = nan\n");
+        let env = load_env_files(&[env]).unwrap();
+        let err = format!("{:#}", load_suite(&suite, &env).unwrap_err());
+        assert!(err.contains("variable `x`"), "{err}");
+        assert!(err.contains("non-finite float"), "{err}");
     }
 }

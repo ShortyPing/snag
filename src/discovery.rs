@@ -4,7 +4,7 @@ use anyhow::Context;
 use regex::RegexSet;
 
 use crate::SelectionArgs;
-use crate::manifest::{Test, load_suite};
+use crate::manifest::{Test, load_env_files, load_suite};
 
 const IGNORED_DIRS: &[&str] = &["target", "node_modules", "dist", "build", ".venv"];
 
@@ -19,9 +19,11 @@ pub fn discover(selection: &SelectionArgs) -> anyhow::Result<Vec<Test>> {
         );
     }
 
+    let env = load_env_files(&selection.env_file)?;
+
     let mut tests = Vec::new();
     for suite in &suites {
-        tests.extend(load_suite(suite)?);
+        tests.extend(load_suite(suite, &env)?);
     }
 
     let filter = Filter::new(selection)?;
@@ -200,6 +202,7 @@ mod tests {
             tag: tag.iter().map(|s| s.to_string()).collect(),
             exclude: exclude.iter().map(|s| s.to_string()).collect(),
             regex,
+            env_file: vec![],
         }
     }
 

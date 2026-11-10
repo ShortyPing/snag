@@ -113,6 +113,17 @@ A test overrides a sub-table with `[test.variables.payload]`. Values arrive as
 constants, so `payload.ok = false` fails the same way reassigning `payload`
 would.
 
+#### Environment files
+
+A file passed with `--env-file` is not a manifest, but it shares this one table:
+
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `variables` | table | empty | Layered over every suite's `[variables]`; same value types as above |
+
+Any other top-level key is an error. See the
+[environment files guide](../guides/variables-and-secrets.mdx#environment-files).
+
 ### Hooks
 
 `setup` and `teardown` accept a path, a table, or a list of either:
@@ -181,9 +192,11 @@ comment out `[[test]]` blocks until `snag list` succeeds.
 
 **Variables** — a test's key wins over the suite's key. Per key, no deep
 merge: a test-level table replaces the suite's table under that key as a whole.
+Variables from [`--env-file`](../guides/variables-and-secrets.mdx#environment-files)
+land in between: over the suite's, under the test's.
 
 ```
-[variables]  →  [test.variables]
+[variables]  →  --env-file  →  [test.variables]
 ```
 
 **Timeouts** — the most specific setting wins, not the tightest one:
@@ -218,7 +231,7 @@ What the runner sees after a manifest is loaded, one per `[[test]]`:
 | `parallel_safe` | `parallel_safe`, else `true` |
 | `cookies` | test `cookies`, else suite `cookies`, else `true` |
 | `script` | `file`, joined to the manifest's directory and normalised |
-| `vars` | suite `variables` merged with test `variables`, TOML types preserved |
+| `vars` | suite `variables`, then `--env-file` variables, then test `variables`; TOML types preserved |
 | `setup` | suite `setup` followed by test `setup`, paths resolved |
 | `teardown` | test `teardown` followed by suite `teardown`, paths resolved |
 | `suite_title` | `title` |

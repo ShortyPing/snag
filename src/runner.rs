@@ -612,6 +612,7 @@ mod tests {
                 tag: vec![],
                 exclude: vec![],
                 regex: false,
+                env_file: vec![],
             },
             jobs: 1,
             fail_fast: false,
